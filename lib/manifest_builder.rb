@@ -1,4 +1,3 @@
-#!/usr/bin/env ruby
 # frozen_string_literal: true
 
 # manifest_builder.rb - Rehearsal Manifest Generator

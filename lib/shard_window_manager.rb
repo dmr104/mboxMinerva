@@ -1,4 +1,3 @@
-#!/usr/bin/env ruby
 # shard_window_manager.rb - Maintains old_train.json as a stratified moving window of recent train shards
 #
 # Usage:
