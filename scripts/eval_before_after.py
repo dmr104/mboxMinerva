@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# Usage: `python3 scripts/eval_before_after.py --base path/to/base.ckpt --ft path/tp/ft.ckpt --test path/to/test.jsonl`
+# Usage: `python3 scripts/eval_before_after.py --base path/to/base.ckpt --ft path/tp/ft.ckpt --test-data path/to/test.jsonl`
 #
 # Explanation: Using LoRA/qLora the adapter deltas as applied on top of the base.
 # base.ckpt is the original model.  Training makes a small adaptor (ft.ckpt) with just the 
 # right weight tweaks, and for eval/inference you load the base + adaptor together.  If you later want the 
 # latest model run merge_lora.rb to baske the adaptor into a standalone fine-tuned checkpoint; though it is 
 # wise to keep base + adaptor separately for reproducibility and future retuning. 
+
+
 
 
 """

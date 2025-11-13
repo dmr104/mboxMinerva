@@ -1,152 +1,102 @@
-# lib/pii_scrubber.rb
 # frozen_string_literal: true
 
 require 'digest'
 require 'json'
+require 'fileutils'
+require_relative 'vault_guard'
 
+##
+# PIIScrubber: Deterministic pseudonymization with encrypted vault storage.
+#
+# Usage:
+#   scrubber = PIIScrubber.new(vault_dir: 'vault/', seed: 42)
+#   scrubbed = scrubber.scrub_email(raw_email_text)
+#   scrubber.save_vault  # Commit mappings to encrypted vault
+#
+# Enforces git-crypt encryption via VaultGuard before any vault I/O.
 class PIIScrubber
-  # Known PII patterns
   EMAIL_REGEX = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/
-  PHONE_REGEX = /\b(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/
-  SSN_REGEX = /\b\d{3}-\d{2}-\d{4}\b/
-  CREDIT_CARD_REGEX = /\b(?:\d{4}[\s-]?){3}\d{4}\b/
-  IP_ADDRESS_REGEX = /\b(?:\d{1,3}\.){3}\d{1,3}\b/
+  IP_REGEX = /\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b/
   
-  # Map to store pseudonym mappings for reversibility (optional)
-  attr_reader :pseudonym_map
-  
-  def initialize(seed: 42, deterministic: true)
-    @seed = seed
-    @deterministic = deterministic
-    @pseudonym_map = {}
-  end
-  
-  # Main scrubbing method
-  def scrub(text)
-    return text if text.nil? || text.empty?
-    
-    scrubbed = text.dup
-    
-    # Scrub emails
-    scrubbed.gsub!(EMAIL_REGEX) { |match| pseudonymize_email(match) }
-    
-    # Scrub phone numbers
-    scrubbed.gsub!(PHONE_REGEX) { |_| '<PHONE>' }
-    
-    # Scrub SSNs
-    scrubbed.gsub!(SSN_REGEX) { |_| '<SSN>' }
-    
-    # Scrub credit cards
-    scrubbed.gsub!(CREDIT_CARD_REGEX) { |_| '<CREDIT_CARD>' }
-    
-    # Scrub IP addresses (optional - may have false positives)
-    scrubbed.gsub!(IP_ADDRESS_REGEX) { |match| pseudonymize_ip(match) }
-    
-    scrubbed
-  end
-  
-  # Process an entire message hash
-  def scrub_message(message)
-    scrubbed = message.dup
-    
-    # Scrub text fields
-    %w[subject body].each do |field|
-      scrubbed[field] = scrub(scrubbed[field]) if scrubbed[field]
-    end
-    
-    # Optionally scrub sender/recipient (or just hash them)
-    if scrubbed['from']
-      scrubbed['from'] = pseudonymize_email(scrubbed['from'])
-    end
-    
-    if scrubbed['to']
-      scrubbed['to'] = scrubbed['to'].is_a?(Array) ? 
-        scrubbed['to'].map { |addr| pseudonymize_email(addr) } :
-        pseudonymize_email(scrubbed['to'])
-    end
-    
-    scrubbed
-  end
-  
-  private
-  
-  def pseudonymize_email(email)
-    return email if @pseudonym_map.key?(email)
-    
-    if @deterministic
-      # Deterministic hash-based pseudonym
-      hash = Digest::SHA256.hexdigest("#{email}-#{@seed}")[0..7]
-      @pseudonym_map[email] = "user_#{hash}@example.com"
-    else
-      # Random pseudonym
-      @pseudonym_map[email] = "user_#{SecureRandom.hex(4)}@example.com"
-    end
-    
-    @pseudonym_map[email]
-  end
-  
-  def pseudonymize_ip(ip)
-    return ip if @pseudonym_map.key?(ip)
-    
-    if @deterministic
-      hash = Digest::SHA256.hexdigest("#{ip}-#{@seed}")[0..7]
-      @pseudonym_map[ip] = "10.0.#{hash[0..1].to_i(16) % 256}.#{hash[2..3].to_i(16) % 256}"
-    else
-      @pseudonym_map[ip] = "10.0.#{rand(256)}.#{rand(256)}"
-    end
-    
-    @pseudonym_map[ip]
-  end
-end
+  attr_reader :vault_dir, :seed
 
-# CLI usage
-if __FILE__ == $PROGRAM_NAME
-  require 'optparse'
-  
-  options = { seed: 42, deterministic: true }
-  
-  OptionParser.new do |opts|
-    opts.banner = "Usage: pii_scrubber.rb [options] INPUT_JSON OUTPUT_JSON"
-    
-    opts.on("-s", "--seed SEED", Integer, "Seed for deterministic pseudonymization (default: 42)") do |s|
-      options[:seed] = s
-    end
-    
-    opts.on("-r", "--[no-]deterministic", "Use deterministic pseudonymization (default: true)") do |d|
-      options[:deterministic] = d
-    end
-    
-    opts.on("--save-map FILE", "Save pseudonym map to FILE (JSON)") do |f|
-      options[:map_file] = f
-    end
-  end.parse!
-  
-  if ARGV.size < 2
-    puts "Error: INPUT_JSON and OUTPUT_JSON required"
-    exit 1
+  def initialize(vault_dir: 'vault/', seed: 42)
+    @vault_dir = vault_dir
+    @seed = seed
+    @email_map = {}
+    @ip_map = {}
+    @rng = Random.new(seed)
+
+    # ENFORCE: git-crypt must be unlocked before loading/saving vault
+    VaultGuard.ensure_unlocked!(vault_dir: vault_dir)
+
+    load_vault
   end
-  
-  input_file, output_file = ARGV
-  
-  scrubber = PIIScrubber.new(seed: options[:seed], deterministic: options[:deterministic])
-  
-  # Process input
-  data = JSON.parse(File.read(input_file))
-  
-  scrubbed_data = if data.is_a?(Array)
-    data.map { |msg| scrubber.scrub_message(msg) }
-  else
-    scrubber.scrub_message(data)
+
+  ##
+  # Scrubs email addresses and IPs with deterministic pseudonyms.
+  # Same input → same pseudonym (seeded hash).
+  def scrub_email(text)
+    text = text.dup
+    text.gsub!(EMAIL_REGEX) { |email| pseudonymize_email(email) }
+    text.gsub!(IP_REGEX) { |ip| pseudonymize_ip(ip) }
+    text
   end
-  
-  # Write output
-  File.write(output_file, JSON.pretty_generate(scrubbed_data))
-  
-  # Optionally save map
-  if options[:map_file]
-    File.write(options[:map_file], JSON.pretty_generate(scrubber.pseudonym_map))
+
+  ##
+  # Reverse lookup: pseudonym → original (for DSR export).
+  # Returns nil if pseudonym not found.
+  def reverse_lookup_email(pseudo)
+    @email_map.key(pseudo)
   end
-  
-  puts "Scrubbed #{data.is_a?(Array) ? data.size : 1} messages -> #{output_file}"
-  puts "Pseudonym map saved to #{options[:map_file]}" if options[:map_file]
+
+  def reverse_lookup_ip(pseudo)
+    @ip_map.key(pseudo)
+  end
+
+  ##
+  # Saves mappings to encrypted vault (git-crypt enforced).
+  # Call after scrubbing batch to persist new pseudonyms.
+  def save_vault
+    VaultGuard.ensure_unlocked!(vault_dir: vault_dir)
+    FileUtils.mkdir_p(vault_dir)
+
+    File.write(File.join(vault_dir, 'email_map.json'), JSON.pretty_generate(@email_map))
+    File.write(File.join(vault_dir, 'ip_map.json'), JSON.pretty_generate(@ip_map))
+    File.write(File.join(vault_dir, 'seed.txt'), @seed.to_s)
+  end
+
+  private
+
+  def load_vault
+    email_file = File.join(vault_dir, 'email_map.json')
+    ip_file = File.join(vault_dir, 'ip_map.json')
+    seed_file = File.join(vault_dir, 'seed.txt')
+
+    @email_map = File.exist?(email_file) ? JSON.parse(File.read(email_file)) : {}
+    @ip_map = File.exist?(ip_file) ? JSON.parse(File.read(ip_file)) : {}
+
+    if File.exist?(seed_file)
+      stored_seed = File.read(seed_file).to_i
+      if stored_seed != @seed
+        warn "[WARN] Vault seed mismatch: stored=#{stored_seed}, requested=#{@seed}. Using stored."
+        @seed = stored_seed
+        @rng = Random.new(@seed)
+      end
+    end
+  end
+
+  def pseudonymize_email(email)
+    @email_map[email] ||= generate_pseudonym("email_#{email}")
+  end
+
+  def pseudonymize_ip(ip)
+    @ip_map[ip] ||= generate_pseudonym("ip_#{ip}")
+  end
+
+  def generate_pseudonym(input)
+    # Deterministic hash: seed + input → stable pseudonym
+    hash = Digest::SHA256.hexdigest("#{@seed}:#{input}")[0..15]
+    "REDACTED_#{hash}"
+  end
 end

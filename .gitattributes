@@ -1,0 +1,8 @@
+# Enforce git-crypt encryption for vault/ (PII pseudonym mappings)
+# All files under vault/ are automatically encrypted when staged
+vault/** filter=git-crypt diff=git-crypt
+
+# Prevent accidental commits of sensitive patterns
+*.key filter=git-crypt diff=git-crypt
+*.pem filter=git-crypt diff=git-crypt
+*_secrets.yml filter=git-crypt diff=git-crypt

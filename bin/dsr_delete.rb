@@ -1,91 +1,67 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-require 'json'
 require 'optparse'
-require 'fileutils'
 require_relative '../lib/dsr_helpers'
+require_relative '../lib/vault_guard'
 
 options = {
-  subject: nil,
-  manifest: 'manifest.jsonl',
-  tombstone_path: 'vault/dsr_tombstones.jsonl',
+  email: nil,
+  manifest: 'data/manifest.json',
+  vault_dir: 'vault/',
+  seed: 42,
+  threads: nil,
   dry_run: false,
-  threads: false
+  reason: 'GDPR Art. 17 - Right to erasure'
 }
 
 OptionParser.new do |opts|
-  opts.banner = "Usage: dsr_delete --subject EMAIL_OR_PSEUDONYM [options]"
-  opts.on('-s', '--subject SUBJECT', 'Real email or pseudonym to delete') { |v| options[:subject] = v }
-  opts.on('-m', '--manifest PATH', 'Path to manifest.jsonl (default: manifest.jsonl)') { |v| options[:manifest] = v }
-  opts.on('-t', '--tombstone PATH', 'Tombstone file (default: vault/dsr_tombstones.jsonl)') { |v| options[:tombstone_path] = v }
-  opts.on('-d', '--dry-run', 'Preview deletions without committing') { options[:dry_run] = true }
-  opts.on('--threads', 'Delete entire threads containing subject') { options[:threads] = true }
-  opts.on('-h', '--help', 'Show this help') { puts opts; exit }
+  opts.banner = 'Usage: bin/dsr_delete --email user@example.com [options]'
+
+  opts.on('--email EMAIL', 'Email to delete') { |v| options[:email] = v }
+  opts.on('--threads ID1,ID2', 'Delete specific thread IDs') { |v| options[:threads] = v.split(',') }
+  opts.on('--manifest PATH', 'Manifest path') { |v| options[:manifest] = v }
+  opts.on('--vault-dir DIR', 'Vault directory') { |v| options[:vault_dir] = v }
+  opts.on('--seed SEED', Integer, 'Vault seed') { |v| options[:seed] = v }
+  opts.on('--dry-run', 'Preview without writing tombstones') { options[:dry_run] = true }
+  opts.on('--reason REASON', 'Deletion reason') { |v| options[:reason] = v }
 end.parse!
 
-unless options[:subject]
-  warn "Error: --subject is required"
-  exit 1
-end
+# Enforce git-crypt before vault lookup
+VaultGuard.ensure_unlocked!(vault_dir: options[:vault_dir])
 
-unless File.exist?(options[:manifest])
-  warn "Error: manifest not found at #{options[:manifest]}"
-  exit 1
-end
+thread_ids = if options[:threads]
+               options[:threads]
+             elsif options[:email]
+               DSRHelpers.locate_email(
+                 options[:email],
+                 manifest_path: options[:manifest],
+                 vault_dir: options[:vault_dir],
+                 seed: options[:seed]
+               )
+             else
+               abort 'Specify --email or --threads'
+             end
 
-# Load vault and existing tombstones
-vault = DSRHelpers.load_vault
-existing_tombstones = DSRHelpers.load_tombstones(options[:tombstone_path])
-
-# Scan manifest
-to_delete = []
-thread_ids = Set.new
-
-File.foreach(options[:manifest]) do |line|
-  record = JSON.parse(line.strip)
-  next if existing_tombstones.include?(record['message_id']) # already tombstoned
-
-  if DSRHelpers.record_matches?(record, options[:subject], vault)
-    to_delete << record
-    thread_ids << record['thread_id'] if options[:threads]
-  end
-end
-
-# Expand to full threads if requested
-if options[:threads]
-  thread_ids.each do |tid|
-    members = DSRHelpers.collect_thread_members(options[:manifest], tid)
-    to_delete.concat(members.reject { |r| to_delete.any? { |dr| dr['message_id'] == r['message_id'] } || existing_tombstones.include?(r['message_id']) })
-  end
-end
-
-to_delete.uniq! { |r| r['message_id'] }
-
-if to_delete.empty?
-  puts "✓ No new records to delete for #{options[:subject]}"
+if thread_ids.empty?
+  puts 'No threads found for given email.'
   exit 0
 end
 
-puts "#{options[:dry_run] ? '[DRY RUN]' : ''} Found #{to_delete.size} record(s) to delete:"
-to_delete.each { |r| puts "  - #{r['message_id']} (#{r['from']})" }
-
-if options[:dry_run]
-  puts "\nRe-run without --dry-run to commit deletions."
-  exit 0
+puts "#{options[:dry_run] ? '[DRY RUN]' : '[LIVE]'} Deleting #{thread_ids.size} thread(s):"
+thread_ids.each do |tid|
+  if options[:dry_run]
+    puts "  Would tombstone: #{tid}"
+  else
+    path = DSRHelpers.tombstone_thread(
+      tid,
+      manifest_path: options[:manifest],
+      reason: options[:reason]
+    )
+    puts "  Tombstoned: #{tid} → #{path}"
+  end
 end
 
-# Write tombstones
-new_tombstones = to_delete.map do |r|
-  {
-    message_id: r['message_id'],
-    subject: options[:subject],
-    deleted_at: Time.now.utc.iso8601,
-    reason: 'DSR deletion request'
-  }
-end
-
-DSRHelpers.append_tombstones(new_tombstones, options[:tombstone_path])
-
-puts "✓ Tombstoned #{new_tombstones.size} record(s) to #{options[:tombstone_path]}"
-puts "  Update your dataloader to filter these message_ids at training time."
+puts "\nNext steps:" unless options[:dry_run]
+puts '  1. Retrain with --respect-tombstones=true'
+puts '  2. git add data/tombstones/ && git commit'

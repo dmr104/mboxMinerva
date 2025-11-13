@@ -1,82 +1,65 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-require 'json'
 require 'optparse'
-require 'fileutils'
 require_relative '../lib/dsr_helpers'
+require_relative '../lib/vault_guard'
 
 options = {
-  subject: nil,
-  manifest: 'manifest.jsonl',
-  output: 'dsr_export',
-  threads: false
+  email: nil,
+  manifest: 'data/manifest.json',
+  vault_dir: 'vault/',
+  seed: 42,
+  threads: nil,
+  reverse: true
 }
 
 OptionParser.new do |opts|
-  opts.banner = "Usage: dsr_export --subject EMAIL_OR_PSEUDONYM [options]"
-  opts.on('-s', '--subject SUBJECT', 'Real email or pseudonym to search') { |v| options[:subject] = v }
-  opts.on('-m', '--manifest PATH', 'Path to manifest.jsonl (default: manifest.jsonl)') { |v| options[:manifest] = v }
-  opts.on('-o', '--output DIR', 'Output directory (default: dsr_export)') { |v| options[:output] = v }
-  opts.on('-t', '--threads', 'Export entire threads containing subject') { options[:threads] = true }
-  opts.on('-h', '--help', 'Show this help') { puts opts; exit }
+  opts.banner = 'Usage: bin/dsr_export --email user@example.com [options]'
+
+  opts.on('--email EMAIL', 'Email to export') { |v| options[:email] = v }
+  opts.on('--threads ID1,ID2', 'Export specific thread IDs (comma-separated)') { |v| options[:threads] = v.split(',') }
+  opts.on('--manifest PATH', 'Manifest path') { |v| options[:manifest] = v }
+  opts.on('--vault-dir DIR', 'Vault directory') { |v| options[:vault_dir] = v }
+  opts.on('--seed SEED', Integer, 'Vault seed') { |v| options[:seed] = v }
+  opts.on('--[no-]reverse', 'Reverse pseudonyms (default: true)') { |v| options[:reverse] = v }
 end.parse!
 
-unless options[:subject]
-  warn "Error: --subject is required"
-  exit 1
+# Enforce git-crypt before any vault access
+if options[:reverse]
+  VaultGuard.ensure_unlocked!(vault_dir: options[:vault_dir])
 end
 
-unless File.exist?(options[:manifest])
-  warn "Error: manifest not found at #{options[:manifest]}"
-  exit 1
+thread_ids = if options[:threads]
+               options[:threads]
+             elsif options[:email]
+               DSRHelpers.locate_email(
+                 options[:email],
+                 manifest_path: options[:manifest],
+                 vault_dir: options[:vault_dir],
+                 seed: options[:seed]
+               )
+             else
+               abort 'Specify --email or --threads'
+             end
+
+if thread_ids.empty?
+  puts 'No threads found for given email.'
+  exit 0
 end
 
-# Load vault and tombstones
-vault = DSRHelpers.load_vault
-tombstones = DSRHelpers.load_tombstones
+puts "Exporting #{thread_ids.size} thread(s):"
+thread_ids.each do |tid|
+  export = DSRHelpers.export_thread(
+    tid,
+    manifest_path: options[:manifest],
+    vault_dir: options[:vault_dir],
+    seed: options[:seed],
+    reverse: options[:reverse]
+  )
+  next unless export
 
-# Scan manifest
-matching_records = []
-thread_ids = Set.new
-
-File.foreach(options[:manifest]) do |line|
-  record = JSON.parse(line.strip)
-  next if tombstones.include?(record['message_id']) # skip deleted
-
-  if DSRHelpers.record_matches?(record, options[:subject], vault)
-    matching_records << record
-    thread_ids << record['thread_id'] if options[:threads]
-  end
+  puts "\n=== Thread: #{tid} ==="
+  puts export[:content]
+  puts "(Reversed: #{export[:reversed]})"
 end
-
-# Expand to full threads if requested
-if options[:threads]
-  thread_ids.each do |tid|
-    members = DSRHelpers.collect_thread_members(options[:manifest], tid)
-    matching_records.concat(members.reject { |r| matching_records.any? { |mr| mr['message_id'] == r['message_id'] } })
-  end
-end
-
-# Write output
-FileUtils.mkdir_p(options[:output])
-out_file = File.join(options[:output], "#{options[:subject].gsub(/[^a-z0-9_-]/i, '_')}.jsonl")
-summary_file = File.join(options[:output], "summary.txt")
-
-File.open(out_file, 'w') do |f|
-  matching_records.uniq { |r| r['message_id'] }.each { |r| f.puts(r.to_json) }
-end
-
-File.open(summary_file, 'w') do |f|
-  f.puts "DSR Export Report"
-  f.puts "=================="
-  f.puts "Subject: #{options[:subject]}"
-  f.puts "Manifest: #{options[:manifest]}"
-  f.puts "Export time: #{Time.now.utc.iso8601}"
-  f.puts "Records found: #{matching_records.size}"
-  f.puts "Threads: #{thread_ids.size}" if options[:threads]
-  f.puts "Output: #{out_file}"
-end
-
-puts "✓ Exported #{matching_records.size} record(s) to #{out_file}"
-puts "  Summary: #{summary_file}"

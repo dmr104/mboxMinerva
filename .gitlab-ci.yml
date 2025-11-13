@@ -1,0 +1,273 @@
+# .gitlab-ci.yml — mboxMinerva CI/CD Pipeline with git-crypt enforcement
+# ============================================================================
+# Stages: lint → test → security → build → release
+# New: git-crypt unlock before any job that touches vault/ or PII modules
+# Required CI/CD Variables (Settings → CI/CD → Variables):
+#   - GPG_PRIVATE_KEY: base64-encoded GPG private key (git-crypt unlock)
+#   - GPG_PASSPHRASE: passphrase for the GPG key (if protected)
+# ============================================================================
+
+stages:
+  - lint
+  - test
+  - security
+  - build
+  - release
+
+variables:
+  # Bundler/pip cache config
+  BUNDLE_PATH: vendor/bundle
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  # Coverage thresholds
+  MIN_COVERAGE: "80"
+
+# ============================================================================
+# Before script: Unlock git-crypt vault for jobs that need PII/DSR access
+# ============================================================================
+.git_crypt_unlock: &git_crypt_unlock
+  - |
+    echo "🔐 Unlocking git-crypt vault..."
+    apt-get update -qq && apt-get install -y -qq git-crypt gnupg
+    echo "$GPG_PRIVATE_KEY" | base64 -d | gpg --batch --import
+    if [ -n "$GPG_PASSPHRASE" ]; then
+      echo "$GPG_PASSPHRASE" | git-crypt unlock
+    else
+      git-crypt unlock
+    fi
+    # Verify vault is unlocked (should show plaintext)
+    if git-crypt status | grep -q 'encrypted:.*vault/'; then
+      echo "❌ ERROR: vault/ still encrypted after unlock!"
+      exit 1
+    fi
+    echo "✅ vault/ unlocked successfully"
+
+# ============================================================================
+# Cache configuration
+# ============================================================================
+cache:
+  key:
+    files:
+      - Gemfile.lock
+      - requirements.txt
+  paths:
+    - vendor/bundle
+    - .cache/pip
+
+# ============================================================================
+# Stage: Lint
+# ============================================================================
+rubocop:
+  stage: lint
+  image: ruby:3.2
+  before_script:
+    - bundle config set --local path 'vendor/bundle'
+    - bundle install --jobs 4
+  script:
+    - bundle exec rubocop --format junit --out rubocop-results.xml
+  artifacts:
+    reports:
+      junit: rubocop-results.xml
+    paths:
+      - rubocop-results.xml
+    expire_in: 1 week
+  allow_failure: true
+
+flake8:
+  stage: lint
+  image: python:3.11
+  before_script:
+    - pip install --quiet flake8
+  script:
+    - flake8 scripts/ --count --statistics --output-file=flake8-results.txt
+  artifacts:
+    paths:
+      - flake8-results.txt
+    expire_in: 1 week
+  allow_failure: true
+
+black:
+  stage: lint
+  image: python:3.11
+  before_script:
+    - pip install --quiet black
+  script:
+    - black --check scripts/
+  allow_failure: true
+
+mypy:
+  stage: lint
+  image: python:3.11
+  before_script:
+    - pip install --quiet mypy torch transformers datasets
+  script:
+    - mypy --ignore-missing-imports scripts/
+  allow_failure: true
+
+# ============================================================================
+# Stage: Test
+# ============================================================================
+rspec:
+  stage: test
+  image: ruby:3.2
+  before_script:
+    - bundle config set --local path 'vendor/bundle'
+    - bundle install --jobs 4
+    # Unlock vault before running tests (PII scrubber, DSR helpers need vault/)
+    - *git_crypt_unlock
+  script:
+    - bundle exec rspec --format progress --format RspecJunitFormatter --out rspec-results.xml
+  coverage: '/\(\d+.\d+\%\) covered/'
+  artifacts:
+    reports:
+      junit: rspec-results.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage/coverage.xml
+    paths:
+      - coverage/
+      - rspec-results.xml
+    expire_in: 1 week
+
+pytest:
+  stage: test
+  image: python:3.11
+  before_script:
+    - pip install --quiet -r requirements.txt
+    - pip install --quiet pytest pytest-cov
+  script:
+    - pytest --cov=scripts --cov-report=xml --cov-report=term --junitxml=pytest-results.xml
+  coverage: '/TOTAL.*\s+(\d+%)$/'
+  artifacts:
+    reports:
+      junit: pytest-results.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml
+    paths:
+      - coverage.xml
+      - pytest-results.xml
+    expire_in: 1 week
+
+# ============================================================================
+# Stage: Security
+# ============================================================================
+secret_detection:
+  stage: security
+  image: python:3.11
+  before_script:
+    - pip install --quiet detect-secrets
+  script:
+    - detect-secrets scan --all-files --force-use-all-plugins > .secrets.baseline.json
+    - detect-secrets audit .secrets.baseline.json
+  artifacts:
+    paths:
+      - .secrets.baseline.json
+    expire_in: 1 week
+  allow_failure: false
+
+sast:
+  stage: security
+  image: python:3.11
+  before_script:
+    - pip install --quiet bandit
+  script:
+    - bandit -r lib/ scripts/ -f json -o bandit-report.json || true
+    - bandit -r lib/ scripts/ -f txt
+  artifacts:
+    paths:
+      - bandit-report.json
+    expire_in: 1 week
+  allow_failure: true
+
+bundler_audit:
+  stage: security
+  image: ruby:3.2
+  before_script:
+    - bundle config set --local path 'vendor/bundle'
+    - bundle install --jobs 4
+    - gem install bundler-audit
+  script:
+    - bundle audit check --update
+  allow_failure: true
+
+split_integrity:
+  stage: security
+  image: ruby:3.2
+  before_script:
+    - bundle config set --local path 'vendor/bundle'
+    - bundle install --jobs 4
+    # Unlock vault before split integrity checks (DSR tombstone filtering needs vault/)
+    - *git_crypt_unlock
+  script:
+    - bundle exec rspec spec/split_integrity_spec.rb --format documentation
+  allow_failure: false
+
+# NEW: Vault encryption verification (ensures vault/ is encrypted in Git history)
+vault_encryption_check:
+  stage: security
+  image: ruby:3.2
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq git-crypt
+  script:
+    - |
+      echo "🔍 Verifying vault/ encryption in Git..."
+      # Check .gitattributes has filter=git-crypt for vault/**
+      if ! grep -q 'vault/\*\* filter=git-crypt' .gitattributes; then
+        echo "❌ ERROR: .gitattributes missing 'vault/** filter=git-crypt'"
+        exit 1
+      fi
+      # Check that vault/ files are actually encrypted in repo (before unlock)
+      if git-crypt status | grep -q 'not encrypted:.*vault/'; then
+        echo "❌ ERROR: Found unencrypted files in vault/"
+        git-crypt status | grep 'not encrypted:.*vault/'
+        exit 1
+      fi
+      echo "✅ vault/ properly encrypted in Git"
+  allow_failure: false
+
+# ============================================================================
+# Stage: Build
+# ============================================================================
+build_artifacts:
+  stage: build
+  image: ruby:3.2
+  before_script:
+    - bundle config set --local path 'vendor/bundle'
+    - bundle install --jobs 4
+  script:
+    - mkdir -p build
+    - tar -czf build/mboxMinerva-${CI_COMMIT_SHORT_SHA}.tar.gz lib/ bin/ docs/ spec/ Gemfile Gemfile.lock README.md LICENSE .gitattributes
+  artifacts:
+    paths:
+      - build/
+    expire_in: 30 days
+  only:
+    - main
+    - tags
+
+# ============================================================================
+# Stage: Release (manual trigger on tags only)
+# ============================================================================
+release:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  script:
+    - echo "Creating release for $CI_COMMIT_TAG"
+  release:
+    tag_name: '$CI_COMMIT_TAG'
+    description: 'Release $CI_COMMIT_TAG - mboxMinerva privacy-safe email LLM pipeline'
+    assets:
+      links:
+        - name: 'mboxMinerva tarball'
+          url: '${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/download?job=build_artifacts'
+  only:
+    - tags
+  when: manual
+
+# ============================================================================
+# Key changes from patchset:
+# 1. Added .git_crypt_unlock YAML anchor for reusable before_script
+# 2. rspec, split_integrity jobs now unlock vault before tests
+# 3. New vault_encryption_check job verifies .gitattributes + Git status
+# 4. Requires CI/CD variables: GPG_PRIVATE_KEY, GPG_PASSPHRASE
+# ============================================================================
