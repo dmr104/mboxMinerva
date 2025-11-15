@@ -80,6 +80,127 @@ mboxMinerva enables **continuous pre-training (CPT) on email archives** with:
 
 ---
 
+## Contamination Protection
+
+mboxMinerva includes cross-split contamination detection to prevent train/val/test leakage from:
+- **Quoted text**: Email replies embedding content from other threads
+- **Near-duplicates**: Saboteur copy-paste or forwarded content
+- **Semantic overlap**: High similarity across splits
+
+### Tools
+
+**`bin/contamination_guard.rb`** - Detects cross-split contamination using:
+- **SimHash (64-bit)**: Fast fingerprinting with Hamming distance matching
+- **w-shingles + Jaccard**: Token n-gram overlap detection (default 5-grams, 70% threshold)
+- **Quote stripping**: Removes lines starting with `>` or `On ... <email> wrote:` patterns
+- **Thread-aware filtering**: Skips same-thread comparisons (already split-pure)
+
+**Quarantine Policies**:
+- `quarantine_test` (default): Remove test/val items that contaminate train
+- `quarantine_both`: Remove both sides of contaminated pairs
+- `coassign`: Flag for manual co-assignment (report-only)
+
+### Usage
+
+#### 1. Materialize splits normally
+
+```bash
+bin/splitter.rb -i data/parsed -o splits/ -m manifest.json --pin 2025-01
+```
+
+#### 2. Run contamination guard
+
+```bash
+bin/contamination_guard.rb \
+  --train splits/train.jsonl \
+  --val splits/val.jsonl \
+  --test splits/test.jsonl \
+  --output reports/contamination_report.json \
+  --exclusion-list reports/exclusion_ids.txt \
+  --threshold 0.70 \
+  --hamming-threshold 8 \
+  --quarantine-policy quarantine_test \
+  --max-contamination-pct 1.0
+```
+
+**Output**:
+- `contamination_report.json`: Full contamination analysis with flagged pairs
+- `exclusion_ids.txt`: Row IDs to exclude (one per line)
+
+#### 3. Rematerialize with exclusions
+
+```bash
+bin/splitter.rb -i data/parsed -o splits_clean/ -m manifest.json \
+  --pin 2025-01 \
+  --exclude reports/exclusion_ids.txt \
+  --materialize all
+```
+
+#### 4. Flip symlinks atomically
+
+```bash
+ln -sfn splits_clean data/splits_active
+```
+
+### Configuration Tuning
+
+**High-recall (strict)**: Catch more contamination, more false positives
+```bash
+--threshold 0.60 --hamming-threshold 10 --max-contamination-pct 0.5
+```
+
+**High-precision (permissive)**: Fewer false positives, may miss edge cases
+```bash
+--threshold 0.80 --hamming-threshold 6 --max-contamination-pct 2.0
+```
+
+**Quote-sensitive**: Disable quote stripping to test raw content
+```bash
+--no-strip-quotes --threshold 0.75
+```
+
+### Operational Workflow
+
+**Weekly cadence** (production):
+1. Ingest new mboxes → `mbox_pre-parser.rb` with threading + cohort stamping
+2. Materialize splits → `splitter.rb` with current pin
+3. Run contamination guard → flag exclusions
+4. Rematerialize clean splits → apply `--exclude`
+5. Flip symlinks → `ln -sfn splits_YYYYMMDD data/splits_active`
+6. Archive old splits + reports for audit trail
+
+**On DSR deletion**:
+1. Tombstone in manifest
+2. Run guard immediately (urgent retraining)
+3. Rematerialize with tombstones + exclusions
+4. Retrain from base checkpoint
+
+**On pin bump** (quarterly):
+1. Advance pin to new cohort (e.g., 2025-01 → 2025-04)
+2. Run guard on new val/test distributions
+3. Validate contamination stays <1%
+4. Archive old pin's splits for reproducibility
+
+### Performance Notes
+
+- **O(n×m)** cross-split comparisons: 10K train × 1K test = 10M pairs
+- **Optimization**: LSH prefix bucketing reduces to ~O(n) for SimHash
+- **Typical runtime**: ~2-5 min for 50K emails on 16-core box
+- **Memory**: ~1-2 GB for fingerprint storage (lightweight)
+
+### Auditing
+
+Contamination report includes:
+- `contamination_pairs`: Total flagged pairs
+- `contamination_pct`: Rate as % of total records
+- `flagged_pairs`: Array of `{row_a, row_b, jaccard, hamming, thread_a, thread_b}`
+- `exclusion_count`: IDs quarantined
+- `status`: PASS/FAIL against `--max-contamination-pct`
+
+Archive reports with splits for SLA compliance and model provenance.
+
+---
+
 ## Installation
 
 ### 1. Clone Repository

@@ -45,6 +45,8 @@ options = {
   window_size: nil,      # e.g., 100 messages per window
   window_overlap: 0,     # e.g., 10 messages overlap
   pin: nil               # e.g., '2025-01' - upper-bound cohort_id cutoff
+  exclude: nil,              # Path to exclusion_ids.txt
+  materialize: 'all'         # Which splits to materialize
 }
 
 OptionParser.new do |opts|
@@ -57,6 +59,8 @@ OptionParser.new do |opts|
   opts.on("--window-size SIZE", Integer, "Rolling window size (messages per chunk)") { |v| options[:window_size] = v }
   opts.on("--window-overlap OVERLAP", Integer, "Rolling window overlap (default: 0)") { |v| options[:window_overlap] = v }
   opts.on("--pin COHORT", "Cohort_id pin (YYYY-MM) - upper-bound filter for materialization") { |v| options[:pin] = v }
+  opts.on("--exclude FILE", "Exclusion list (row IDs to filter out)") { |v| options[:exclude] = v }
+  opts.on("--materialize SPLIT", "Materialize only specific split (train|val|test|all)") { |v| options[:materialize] = v }
 end.parse!
 
 abort "Missing -i input directory" unless options[:input]
@@ -88,15 +92,30 @@ def assign_split(thread_id, seed)
   end
 end
 
-# Load all emails from input directory
+# Load exclusion list if provided
+exclusion_ids = Set.new
+if options[:exclude] && File.exist?(options[:exclude])
+  exclusion_ids = File.readlines(options[:exclude]).map(&:strip).to_set
+  puts "Loaded #{exclusion_ids.size} exclusion IDs from #{options[:exclude]}"
+end
+
 emails = []
 Dir.glob("#{options[:input]}/**/*.json").each do |file|
   data = JSON.parse(File.read(file))
   # Handle both single emails and arrays
-  emails.concat(data.is_a?(Array) ? data : [data])
+  batch = data.is_a?(Array) ? data : [data]
+  
+  # Filter out excluded IDs
+  batch.reject! do |e|
+    row_id = e['message_id'] || e['id']
+    exclusion_ids.include?(row_id)
+  end
+  
+  emails.concat(batch)
 end
 
-puts "Loaded #{emails.size} emails"
+excluded_count = exclusion_ids.size
+puts "Loaded #{emails.size} emails (#{excluded_count} excluded)"
 
 # Warn on nil cohort_id
 nil_cohort_count = emails.count { |e| e['cohort_id'].nil? || e['cohort_id'].empty? }
@@ -175,7 +194,7 @@ end
 File.write(options[:manifest], JSON.pretty_generate(manifest))
 puts "Manifest updated: #{options[:manifest]} (#{manifest.size} IDs)"
 
-# Materialize train/val/test lists
+# Materialize train/val/test lists based on --materialize option
 FileUtils.mkdir_p(options[:output])
 
 splits = { 'train' => [], 'val' => [], 'test' => [] }
@@ -183,14 +202,25 @@ manifest.each do |id, entry|
   splits[entry['split']] << entry
 end
 
-splits.each do |split_name, entries|
+# Determine which splits to write
+splits_to_write = case options[:materialize]
+when 'all'
+  ['train', 'val', 'test']
+when 'train', 'val', 'test'
+  [options[:materialize]]
+else
+  abort "Invalid --materialize value: #{options[:materialize]} (must be train|val|test|all)"
+end
+
+splits_to_write.each do |split_name|
+  entries = splits[split_name]
   outfile = File.join(options[:output], "#{split_name}.json")
   File.write(outfile, JSON.pretty_generate(entries))
   puts "Wrote #{entries.size} IDs to #{outfile}"
 end
 
 if options[:pin]
-  puts "Done. Manifest frozen for #{manifest.size} IDs (materialized with pin <= #{options[:pin]})."
+  puts "Done. Manifest frozen for #{manifest.size} IDs (materialized #{splits_to_write.join(', ')} with pin <= #{options[:pin]})."
 else
-  puts "Done. Manifest frozen for #{manifest.size} IDs."
+  puts "Done. Manifest frozen for #{manifest.size} IDs (materialized #{splits_to_write.join(', ')})."
 end
