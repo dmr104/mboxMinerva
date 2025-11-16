@@ -1,6 +1,8 @@
 #!/usr/bin/env ruby
-# mbox_pre-parser.rb - Convert mbox to JSON format compatible with refactored_splitter.rb
-# Usage: ruby mbox_pre-parser.rb input.mbox -o output.json [--cohort YYYY-MM]
+# mbox_pre-parser.rb - Convert mbox to JSON format compatible with splitter.rb
+# Usage: ruby mbox_pre-parser.rb input.mbox [--output FILE] [--cohort YYYY-MM] [--shard-size N]
+# Output: By default, writes sharded JSONL to emails/part-NNNNN.jsonl
+#         With --output FILE, writes single JSON file
 # Output: `[{"message_id": "...", "thread_id": "...", "cohort_id": "...", "email_message": "raw RFC 822..."}]`
 
 require 'json'
@@ -8,12 +10,13 @@ require 'digest/sha256'
 require 'mail'
 require 'optparse'
 require 'date'
+require 'fileutils'
 
 def parse_mbox(mbox_path)
   messages = []
   current_message = []
   in_message = false
-  
+
   File.open(mbox_path, 'r:UTF-8') do |file|
     file.each_line do |line|
       # mbox separator: lines starting with "From " (not "From:")
@@ -28,13 +31,11 @@ def parse_mbox(mbox_path)
         current_message << line if in_message
       end
     end
-    
     # Save last message
     if in_message && !current_message.empty?
       messages << current_message.join
     end
   end
-  
   messages
 end
 
@@ -42,13 +43,11 @@ def extract_message_id(raw_email)
   begin
     mail = Mail.new(raw_email)
     msg_id = mail.message_id
-    
     # If no Message-ID header, synthesize one from content hash
     if msg_id.nil? || msg_id.empty?
       hash = Digest::SHA256.hexdigest(raw_email)[0..15]
       msg_id = "synthetic-#{hash}@generated"
     end
-    
     msg_id
   rescue => e
     # Fallback if parsing fails completely
@@ -69,19 +68,18 @@ def derive_thread_id(mail, message_id)
   # 2. Else use In-Reply-To
   # 3. Else use normalized Subject hash
   # 4. Else use message_id itself (new thread)
-  
   begin
     # Try References header (oldest ancestor)
     if mail.references && !mail.references.empty?
       return mail.references.first.to_s.strip
     end
-    
+
     # Try In-Reply-To header
     if mail.in_reply_to && !mail.in_reply_to.empty?
       in_reply = mail.in_reply_to.is_a?(Array) ? mail.in_reply_to.first : mail.in_reply_to
       return in_reply.to_s.strip
     end
-    
+
     # Fallback to normalized subject hash
     subject = mail.subject
     if subject && !subject.empty?
@@ -90,7 +88,7 @@ def derive_thread_id(mail, message_id)
         return "subject-#{Digest::SHA256.hexdigest(normalized)[0..15]}"
       end
     end
-    
+
     # Final fallback: this message starts a new thread
     return message_id
   rescue => e
@@ -104,9 +102,8 @@ def stamp_cohort_id(mail, mbox_path, override_cohort)
   # 1. Use --cohort override if provided
   # 2. Else parse Date: header from email
   # 3. Else use mbox file mtime as fallback
-  
   return override_cohort if override_cohort
-  
+
   begin
     # Try Date: header
     if mail.date
@@ -115,24 +112,41 @@ def stamp_cohort_id(mail, mbox_path, override_cohort)
   rescue => e
     # Parse error, fall through to mtime
   end
-  
+
   # Fallback to file modification time
   File.mtime(mbox_path).strftime('%Y-%m')
 end
 
 # Parse command-line arguments
-options = {}
+options = {
+  shard_size: 1000,  # Default shard size
+  output_dir: 'emails'  # Default output directory for shards
+}
+
 OptionParser.new do |opts|
-  opts.banner = "Usage: ruby mbox_pre-parser.rb input.mbox -o output.json [--cohort YYYY-MM]"
-  
-  opts.on("-o", "--output FILE", "Output JSON file") do |o|
+  opts.banner = "Usage: ruby mbox_pre-parser.rb input.mbox [OPTIONS]"
+  opts.separator ""
+  opts.separator "By default, writes sharded JSONL files to emails/part-NNNNN.jsonl"
+  opts.separator "Use --output FILE to override and write single JSON file instead"
+  opts.separator ""
+  opts.separator "Options:"
+
+  opts.on("-o", "--output FILE", "Write single JSON file (overrides default sharding)") do |o|
     options[:output] = o
   end
-  
+
   opts.on("--cohort COHORT", "Override cohort_id (YYYY-MM format)") do |c|
     options[:cohort] = c
   end
-  
+
+  opts.on("--shard-size N", Integer, "Messages per shard (default: 1000)") do |s|
+    options[:shard_size] = s
+  end
+
+  opts.on("--output-dir DIR", "Output directory for shards (default: emails/)") do |d|
+    options[:output_dir] = d
+  end
+
   opts.on("-h", "--help", "Show this help") do
     puts opts
     exit
@@ -141,12 +155,11 @@ end.parse!
 
 if ARGV.empty?
   puts "Error: No input mbox file specified"
-  puts "Usage: ruby mbox_pre-parser.rb input.mbox -o output.json [--cohort YYYY-MM]"
+  puts "Usage: ruby mbox_pre-parser.rb input.mbox [OPTIONS]"
   exit 1
 end
 
 mbox_path = ARGV[0]
-output_path = options[:output] || "output.json"
 
 unless File.exist?(mbox_path)
   puts "Error: File not found: #{mbox_path}"
@@ -163,7 +176,7 @@ json_output = raw_messages.map do |raw_email|
   message_id = extract_message_id(raw_email)
   thread_id = derive_thread_id(mail, message_id)
   cohort_id = stamp_cohort_id(mail, mbox_path, options[:cohort])
-  
+
   {
     "message_id" => message_id,
     "thread_id" => thread_id,
@@ -172,12 +185,34 @@ json_output = raw_messages.map do |raw_email|
   }
 end
 
-# Write JSON output
-File.open(output_path, 'w') do |f|
-  f.write(JSON.pretty_generate(json_output))
+# Write output: sharded by default, single file if --output specified
+if options[:output]
+  # Single-file mode (legacy override)
+  File.open(options[:output], 'w') do |f|
+    f.write(JSON.pretty_generate(json_output))
+  end
+  puts "Output written to: #{options[:output]} (single file)"
+else
+  # Default sharded mode
+  output_dir = options[:output_dir]
+  FileUtils.mkdir_p(output_dir)
+  
+  shard_size = options[:shard_size]
+  shard_count = (json_output.size.to_f / shard_size).ceil
+  
+  json_output.each_slice(shard_size).with_index(1) do |shard, index|
+    shard_file = File.join(output_dir, "part-%05d.jsonl" % index)
+    File.open(shard_file, 'w') do |f|
+      shard.each do |record|
+        f.puts JSON.generate(record)
+      end
+    end
+    puts "  Written shard #{index}/#{shard_count}: #{shard_file} (#{shard.size} messages)"
+  end
+  
+  puts "Output written to: #{output_dir}/ (#{shard_count} shards)"
 end
 
-puts "Output written to: #{output_path}"
 puts "Messages: #{json_output.size}"
 
 # Thread statistics
@@ -189,4 +224,9 @@ puts "Largest thread: #{thread_counts.values.max} messages"
 cohort_counts = json_output.group_by { |m| m["cohort_id"] }.transform_values(&:size)
 puts "Cohorts: #{cohort_counts.keys.sort.join(', ')}"
 
-puts "Ready for: ruby splitter.rb -i #{output_path} -o splits/ --pin YYYY-MM"
+if options[:output]
+  puts "Ready for: ruby splitter.rb -i #{options[:output]} -o splits/ --pin YYYY-MM"
+else
+  puts "Ready for: ruby splitter.rb -i #{output_dir}/ -o splits/ --pin YYYY-MM"
+end
+

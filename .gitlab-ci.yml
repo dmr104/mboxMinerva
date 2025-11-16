@@ -11,6 +11,7 @@ stages:
   - lint
   - test
   - security
+  - monitor
   - build
   - release
 
@@ -383,6 +384,17 @@ vault_encryption_check:
       echo "✅ vault/ properly encrypted in Git"
   allow_failure: false
 
+# ============================================================================
+# Stage: Monitor
+# ============================================================================ 
+
+metrics_watch:
+  stage: monitor
+  script:
+    - bin/metrics_watcher.rb --config config/alerts.yml --manifest data/manifest.jsonl
+  only:
+    - schedules  # Triggered by pipeline schedules (daily/weekly)
+  allow_failure: true  # Don't block pipeline if alerts fire
 
 
 # ============================================================================

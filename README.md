@@ -142,6 +142,44 @@ bin/splitter.rb -i data/parsed -o splits_clean/ -m manifest.json \
 ln -sfn splits_clean data/splits_active
 ```
 
+### CI/CD Integration
+
+Add to `.gitlab-ci.yml`:
+
+```yaml
+contamination-check:
+  stage: test
+  script:
+    # Materialize temp splits
+    - bin/splitter.rb -i data/parsed -o splits_temp/ -m manifest.json --pin 2025-01
+    
+    # Run guard
+    - bin/contamination_guard.rb 
+        --train splits_temp/train.jsonl 
+        --val splits_temp/val.jsonl 
+        --test splits_temp/test.jsonl 
+        --output reports/contamination_report.json 
+        --exclusion-list reports/exclusion_ids.txt 
+        --max-contamination-pct 1.0
+    
+    # Rematerialize clean splits if passed
+    - bin/splitter.rb -i data/parsed -o splits_clean/ -m manifest.json 
+        --pin 2025-01 
+        --exclude reports/exclusion_ids.txt 
+        --materialize all
+        
+  artifacts:
+    paths:
+      - reports/contamination_report.json
+      - reports/exclusion_ids.txt
+      - splits_clean/
+    reports:
+      junit: reports/contamination_report.json
+  only:
+    - schedules
+    - manual
+```
+
 ### Configuration Tuning
 
 **High-recall (strict)**: Catch more contamination, more false positives
@@ -200,6 +238,172 @@ Contamination report includes:
 Archive reports with splits for SLA compliance and model provenance.
 
 ---
+
+## Metrics Watcher & Alerting
+
+### Overview
+
+`bin/metrics_watcher.rb` computes key performance indicators (KPIs) from your manifest and splits, then fires alerts via email, Slack, or webhooks when thresholds are breached.
+
+**Monitored KPIs**:
+- **Exclusion backlog**: % of manifest rows excluded by pin or quarantine (signals drift)
+- **Split distribution**: train/val/test ratio (detects imbalance from DSR or filtering)
+- **Contamination drift**: cross-split leakage rate (eval trustworthiness)
+- **Tombstone count**: DSR deletions accumulating (triggers retrain reminders)
+
+**Key Performance Areas (KPAs)**:
+- Inbox Quality & Model Freshness
+- Evaluation Trustworthiness
+- Training Efficiency
+- Privacy Compliance & SLA
+
+### Configuration
+
+Edit `config/alerts.yml` to define:
+1. **KPIs**: metric paths, thresholds, recommended actions
+2. **Notifications**: SMTP, Slack webhook, or custom webhook endpoints
+
+Example KPI definition:
+
+```yaml
+kpis:
+  exclusion_backlog_high:
+    kpa: 'Inbox Quality & Model Freshness'
+    metric_path: 'exclusion_backlog.exclusion_pct'
+    threshold: 15.0
+    comparison: 'gt'
+    severity: 'warning'
+    recommended_action: |
+      Bump the cohort pin to include newer data:
+      bin/splitter.rb --pin 2025-04 --materialize all
+```
+
+### Usage
+
+**Manual run**:
+
+```bash
+bin/metrics_watcher.rb \
+  --config config/alerts.yml \
+  --manifest data/manifest.jsonl \
+  --pin 2025-01
+```
+
+**Scheduled (cron)**:
+
+```cron
+# Every Monday at 9am
+0 9 * * 1 cd /app && bin/metrics_watcher.rb --config config/alerts.yml
+```
+
+**GitLab CI integration** (add to `.gitlab-ci.yml`):
+
+```yaml
+metrics_watch:
+  stage: monitor
+  script:
+    - bin/metrics_watcher.rb --config config/alerts.yml --manifest data/manifest.jsonl
+  only:
+    - schedules  # Triggered by pipeline schedules (daily/weekly)
+  allow_failure: true  # Don't block pipeline if alerts fire
+```
+
+### Alert Channels
+
+#### Email (SMTP)
+Configure in `config/alerts.yml`:
+
+```yaml
+notifications:
+  email:
+    enabled: true
+    smtp_server: 'smtp.gmail.com'
+    smtp_port: 587
+    from: 'alerts@example.com'
+    to: 'admin@example.com'
+```
+
+#### Slack
+Get a webhook URL from Slack (Incoming Webhooks app):
+
+```yaml
+notifications:
+  slack:
+    enabled: true
+    webhook_url: 'https://hooks.slack.com/services/T00/B00/XXX'
+```
+
+#### Generic Webhook
+POST JSON payload to your monitoring system:
+
+```yaml
+notifications:
+  webhook:
+    enabled: true
+    url: 'https://your-siem.example.com/api/alerts'
+```
+
+### Alert Message Format
+
+**Email** includes:
+- KPI name & KPA
+- Current value vs threshold
+- Recommended CLI command
+- Full stats snapshot (JSON)
+
+**Slack** attachment includes:
+- Color-coded severity (warning=yellow, critical=red)
+- Inline fields for KPI, KPA, value, threshold
+- Recommended action
+
+**Webhook** posts raw JSON:
+
+```json
+{
+  "timestamp": "2025-11-15T16:11:00Z",
+  "severity": "warning",
+  "kpi": "exclusion_backlog_high",
+  "kpa": "Inbox Quality & Model Freshness",
+  "current_value": 18.5,
+  "threshold": 15.0,
+  "recommended_action": "Bump the cohort pin...",
+  "stats_snapshot": { ... }
+}
+```
+
+### Tuning Thresholds
+
+**Conservative (fewer false alarms)**:
+- Raise thresholds (e.g., exclusion_backlog: 25% instead of 15%)
+- Use `critical` severity sparingly
+
+**Aggressive (catch issues early)**:
+- Lower thresholds (e.g., contamination: 0.5% instead of 1%)
+- Add more KPIs (e.g., val/test split size minimums)
+
+### Troubleshooting
+
+**"No alerts fired"**:
+- Check `--pin` matches your actual splits
+- Verify manifest path is correct
+- Run with `--debug` to see computed stats
+
+**"Email/Slack failed"**:
+- Test SMTP credentials: `telnet smtp.example.com 587`
+- Verify Slack webhook URL is valid (test with `curl`)
+- Check firewall rules if running in CI
+
+**"Metric path not found"**:
+- Stats are logged to stdout; verify `metric_path` matches JSON structure
+- Example: `exclusion_backlog.exclusion_pct` maps to `@stats[:exclusion_backlog][:exclusion_pct]`
+
+### KPI/KPA Sales Language
+
+**KPA** = Key Performance Area: the big business outcome you care about (e.g., "inbox quality", "support velocity")
+
+**KPI** = Key Performance Indicator: the specific dashboard number proving you're winning or losing in that area (e.g., "95% spam blocked", "median response <2min")
+
+When exclusion backlog crosses 15%, you're risking **stale model predictions** (KPA: Model Freshness) because new email patterns aren't in your training set - the recommended action is to bump the pin so fresh cohorts enter train/val/test and close the drift gap.
 
 ## Installation
 

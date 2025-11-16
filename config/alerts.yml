@@ -1,0 +1,84 @@
+# config/alerts.yml
+# KPI = key performance indicator
+# KPA = key performance area
+# KPI/KPA thresholds and alerting configuration for mboxMinerva
+
+defaults:
+  pin: '2025-01'  # Current cohort pin
+
+# KPI definitions: map metric paths to business areas (KPAs) and thresholds
+kpis:
+  exclusion_backlog_high:
+    kpa: 'Inbox Quality & Model Freshness'
+    metric_path: 'exclusion_backlog.exclusion_pct'
+    threshold: 15.0  # Percent of manifest excluded
+    comparison: 'gt'  # greater than
+    severity: 'warning'
+    recommended_action: |
+      Exclusion backlog has reached 15% of your manifest.
+      → Action: Consider bumping the cohort pin to include newer data.
+      → Command: Edit config/alerts.yml and set pin to next cohort (e.g., 2025-04),
+                 then rematerialize: bin/splitter.rb --pin 2025-04 --materialize all
+  
+  exclusion_backlog_critical:
+    kpa: 'Inbox Quality & Model Freshness'
+    metric_path: 'exclusion_backlog.exclusion_pct'
+    threshold: 25.0
+    comparison: 'gt'
+    severity: 'critical'
+    recommended_action: |
+      CRITICAL: Exclusion backlog exceeds 25%.
+      → Action: URGENT pin bump + retrain required. Your model is training on stale data.
+      → Command: bin/splitter.rb --pin <NEW_COHORT> --materialize all && schedule retrain.
+  
+  contamination_drift:
+    kpa: 'Evaluation Trustworthiness'
+    metric_path: 'contamination.contamination_pct'
+    threshold: 1.0
+    comparison: 'gt'
+    severity: 'warning'
+    recommended_action: |
+      Cross-split contamination exceeds 1%.
+      → Action: Tighten contamination thresholds or investigate flagged pairs.
+      → Command: Review reports/contamination_report.json, consider lowering
+                 --threshold or enabling --no-strip-quotes in contamination_guard.rb
+  
+  split_imbalance_train:
+    kpa: 'Training Efficiency'
+    metric_path: 'split_distribution.train_pct'
+    threshold: 75.0  # Expected ~80%, alert if < 75%
+    comparison: 'lt'
+    severity: 'warning'
+    recommended_action: |
+      Training split has dropped below 75% (target: 80%).
+      → Action: Investigate if DSR deletions or pin filters are skewing splits.
+      → Command: Check bin/splitter.rb split assignment logic and tombstone counts.
+  
+  tombstone_surge:
+    kpa: 'Privacy Compliance & SLA'
+    metric_path: 'tombstones.count'
+    threshold: 100
+    comparison: 'gt'
+    severity: 'warning'
+    recommended_action: |
+      Tombstone count exceeds 100 (DSR deletions accumulating).
+      → Action: Schedule a full retrain to purge deleted data from model weights.
+      → Command: bin/retrain.rb --train data/mixed_train.json --val splits/val.json
+                 (ensure dataloader respects tombstones with respect_tombstones: true)
+
+# Notification channels
+notifications:
+  email:
+    enabled: true
+    smtp_server: 'smtp.example.com'
+    smtp_port: 587
+    from: 'mboxminerva-alerts@example.com'
+    to: 'admin@example.com'
+  
+  slack:
+    enabled: true
+    webhook_url: 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
+  
+  webhook:
+    enabled: false
+    url: 'https://your-webhook-endpoint.example.com/alerts'
