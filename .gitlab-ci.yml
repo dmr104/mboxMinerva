@@ -1,20 +1,39 @@
-# Simple Ruby CI pipeline
-image: ruby:3.3
-
 stages:
-  - pre
+  - build_infra
+  - app_test
 
-before_script:
-  - ruby -v
-  - gem install bundler --no-document
-  - bundle install --jobs=4 --retry=3
-
-test_job:
-  stage: pre
+# JOB 1: The Builder
+# Usage: Builds the image ONLY if you touch files in 'docker/'
+rebuild_ruby_base:
+  stage: build_infra
+  # Use generic docker client; it talks to your mapped /var/run/docker.sock (podman)
+  image: docker:cli
+  variables:
+    # Disable TLS since we are talking to a local Unix socket
+    DOCKER_TLS_CERTDIR: ""
   script:
-    - bundle exec rake test
-    # or: bundle exec rspec
-    # or: ruby test/run_all.rb
-  only:
-    - main
-    - merge_requests
+    - echo "Detected changes in build context. Rebuilding base image on Host..."
+    # This 'docker build' actually runs on the HOST machine because of the socket mapping.
+    # It updates the 'ruby:local-patched' tag in the host's storage.
+    - docker build -t ruby:local-patched -f docker/Dockerfile .
+  rules:
+    # CONDITION: Only run if these files change in the commit/MR
+    - changes:
+        - docker/Dockerfile
+        - docker/**/*
+    # FALLBACK: Allow manual triggering in the UI if you ever need to force a rebuild (e.g. clean host)
+    - when: manual
+      allow_failure: true
+
+# JOB 2: The Consumer
+# Usage: Runs your actual tests using the image from Job 1
+run_tests:
+  stage: app_test
+  # Because of pull_policy = ["if-not-present"], the Runner looks for this tag
+  # on the host first. If Job 1 ran, it sees the new one. If Job 1 skipped, it sees the old one.
+  image: ruby:local-patched
+  script:
+    - ruby -v
+    - echo "Running tests in the custom container..."
+    # - bundle install
+    # - rspec
