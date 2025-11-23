@@ -1,0 +1,491 @@
+# .gitlab-ci.yml — mboxMinerva CI/CD Pipeline with git-crypt enforcement
+# ============================================================================
+# Stages: lint → test → security → build → release
+# New: git-crypt unlock before any job that touches vault/ or PII modules
+# Required CI/CD Variables (Settings → CI/CD → Variables):
+#   - GPG_PRIVATE_KEY: base64-encoded GPG private key (git-crypt unlock)
+#   - GPG_PASSPHRASE: passphrase for the GPG key (if protected)
+# ============================================================================
+
+stages:
+  - lint
+  - test
+  - security
+  - monitor
+  - build
+  - release
+
+variables:
+  # Bundler/pip cache config
+  BUNDLE_PATH: vendor/bundle
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  # Coverage thresholds
+  MIN_COVERAGE: "80"
+
+# ============================================================================
+# Before script: Unlock git-crypt vault for jobs that need PII/DSR access
+# ============================================================================
+.git_crypt_unlock: &git_crypt_unlock
+  - |
+    echo "🔐 Unlocking git-crypt vault..."
+    apt-get update -qq && apt-get install -y -qq git-crypt gnupg
+    echo "$GPG_PRIVATE_KEY" | base64 -d | gpg --batch --import
+    if [ -n "$GPG_PASSPHRASE" ]; then
+      echo "$GPG_PASSPHRASE" | git-crypt unlock
+    else
+      git-crypt unlock
+    fi
+    # Verify vault is unlocked (should show plaintext)
+    if git-crypt status | grep -q 'encrypted:.*vault/'; then
+      echo "❌ ERROR: vault/ still encrypted after unlock!"
+      exit 1
+    fi
+    echo "✅ vault/ unlocked successfully"
+
+# ============================================================================
+# Cache configuration
+# ============================================================================
+cache:
+  key:
+    files:
+      - Gemfile.lock
+      - requirements.txt
+  paths:
+    - vendor/bundle
+    - .cache/pip
+
+# ============================================================================
+# Stage: Lint
+# ============================================================================
+rubocop:
+  stage: lint
+  image: ruby:3.2
+  before_script:
+    - bundle config set --local path 'vendor/bundle'
+    - bundle install --jobs 4
+  script:
+    - bundle exec rubocop --format junit --out rubocop-results.xml
+  artifacts:
+    reports:
+      junit: rubocop-results.xml
+    paths:
+      - rubocop-results.xml
+    expire_in: 1 week
+  allow_failure: true
+
+flake8:
+  stage: lint
+  image: python:3.11
+  before_script:
+    - pip install --quiet flake8
+  script:
+    - flake8 scripts/ --count --statistics --output-file=flake8-results.txt
+  artifacts:
+    paths:
+      - flake8-results.txt
+    expire_in: 1 week
+  allow_failure: true
+
+black:
+  stage: lint
+  image: python:3.11
+  before_script:
+    - pip install --quiet black
+  script:
+    - black --check scripts/
+  allow_failure: true
+
+mypy:
+  stage: lint
+  image: python:3.11
+  before_script:
+    - pip install --quiet mypy torch transformers datasets
+  script:
+    - mypy --ignore-missing-imports scripts/
+  allow_failure: true
+
+# ============================================================================
+# Stage: Test
+# ============================================================================
+rspec:
+  stage: test
+  image: ruby:3.2
+  before_script:
+    - bundle config set --local path 'vendor/bundle'
+    - bundle install --jobs 4
+    # Unlock vault before running tests (PII scrubber, DSR helpers need vault/)
+    - *git_crypt_unlock
+  script:
+    - bundle exec rspec --format progress --format RspecJunitFormatter --out rspec-results.xml
+  coverage: '/\(\d+.\d+\%\) covered/'
+  artifacts:
+    reports:
+      junit: rspec-results.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage/coverage.xml
+    paths:
+      - coverage/
+      - rspec-results.xml
+    expire_in: 1 week
+
+pytest:
+  stage: test
+  image: python:3.11
+  before_script:
+    - pip install --quiet -r requirements.txt
+    - pip install --quiet pytest pytest-cov
+  script:
+    - pytest --cov=scripts --cov-report=xml --cov-report=term --junitxml=pytest-results.xml
+  coverage: '/TOTAL.*\s+(\d+%)$/'
+  artifacts:
+    reports:
+      junit: pytest-results.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml
+    paths:
+      - coverage.xml
+      - pytest-results.xml
+    expire_in: 1 week
+
+contamination-check:
+  stage: test
+  script:
+    # Materialize temp splits
+    - bin/splitter.rb -i data/parsed -o splits_temp/ -m manifest.json --pin 2025-01
+    
+    # Run guard
+    - bin/contamination_guard.rb 
+        --train splits_temp/train.jsonl 
+        --val splits_temp/val.jsonl 
+        --test splits_temp/test.jsonl 
+        --output reports/contamination_report.json 
+        --exclusion-list reports/exclusion_ids.txt 
+        --max-contamination-pct 1.0
+    
+    # Rematerialize clean splits if passed
+    - bin/splitter.rb -i data/parsed -o splits_clean/ -m manifest.json 
+        --pin 2025-01 
+        --exclude reports/exclusion_ids.txt 
+        --materialize all
+        
+  artifacts:
+    paths:
+      - reports/contamination_report.json
+      - reports/exclusion_ids.txt
+      - splits_clean/
+    reports:
+      junit: reports/contamination_report.json
+  only:
+    - schedules
+    - manual
+
+# ============================================================================
+# Stage: Security
+# ============================================================================
+secret_detection:
+  stage: security
+  image: python:3.11
+  before_script:
+    - pip install --quiet detect-secrets
+  script:
+    - detect-secrets scan --all-files --force-use-all-plugins > .secrets.baseline.json
+    - detect-secrets audit .secrets.baseline.json
+  artifacts:
+    paths:
+      - .secrets.baseline.json
+    expire_in: 1 week
+  allow_failure: false
+
+sast:
+  stage: security
+  image: python:3.11
+  before_script:
+    - pip install --quiet bandit
+  script:
+    - bandit -r lib/ scripts/ -f json -o bandit-report.json || true
+    - bandit -r lib/ scripts/ -f txt
+  artifacts:
+    paths:
+      - bandit-report.json
+    expire_in: 1 week
+  allow_failure: true
+
+bundler_audit:
+  stage: security
+  image: ruby:3.2
+  before_script:
+    - bundle config set --local path 'vendor/bundle'
+    - bundle install --jobs 4
+    - gem install bundler-audit
+  script:
+    - bundle audit check --update
+  allow_failure: true
+
+split_integrity:
+  stage: security
+  image: ruby:3.2
+  before_script:
+    - bundle config set --local path 'vendor/bundle'
+    - bundle install --jobs 4
+    # Unlock vault before split integrity checks (DSR tombstone filtering needs vault/)
+    - *git_crypt_unlock
+  script:
+    - bundle exec rspec spec/split_integrity_spec.rb --format documentation
+  allow_failure: false
+
+# Job 1: Materialize temporary splits for contamination analysis
+materialize_temp_splits:
+  stage: security  # or 'qa' if using Option A
+  image: ruby:3.2
+  before_script:
+    - bundle config set --local path 'vendor/bundle'
+    - bundle install --jobs 4
+    - *git_crypt_unlock  # Need vault for pseudonymization lookups
+  script:
+    - mkdir -p tmp/splits
+    - |
+      echo "📊 Materializing temporary train/val/test for contamination check..."
+      bundle exec ruby bin/splitter.rb \
+        --manifest manifest/manifest.jsonl \
+        --pin $(date +%Y-%m) \
+        --output-dir tmp/splits \
+        --materialize all
+    - ls -lh tmp/splits/
+  artifacts:
+    paths:
+      - tmp/splits/train.jsonl
+      - tmp/splits/val.jsonl
+      - tmp/splits/test.jsonl
+    expire_in: 1 hour  # Short-lived, just for next job
+  only:
+    - main
+    - merge_requests
+  needs: ["split_integrity"]  # Run after integrity checks pass
+
+# Job 2: Run contamination guard cross-split analysis
+contamination_guard:
+  stage: security  # or 'qa' if using Option A
+  image: ruby:3.2
+  before_script:
+    - bundle config set --local path 'vendor/bundle'
+    - bundle install --jobs 4
+  script:
+    - |
+      echo "🔍 Running cross-split near-dup detection..."
+      bundle exec ruby bin/contamination_guard.rb \
+        --train tmp/splits/train.jsonl \
+        --val tmp/splits/val.jsonl \
+        --test tmp/splits/test.jsonl \
+        --threshold 0.70 \
+        --shingle-size 5 \
+        --policy quarantine_test \
+        --output contamination_report.json
+    - |
+      # Fail pipeline if contamination exceeds acceptable threshold
+      CONTAM_PCT=$(jq -r '.summary.contamination_pct' contamination_report.json)
+      echo "📈 Contamination rate: ${CONTAM_PCT}%"
+      if (( $(echo "$CONTAM_PCT > 1.0" | bc -l) )); then
+        echo "❌ FAIL: Contamination >1.0% - manual review required"
+        exit 1
+      fi
+      echo "✅ PASS: Contamination within acceptable bounds"
+  artifacts:
+    paths:
+      - contamination_report.json
+      - exclusion_ids.txt
+    reports:
+      junit: contamination_report.json  # Optional: format as test report
+    expire_in: 30 days
+    when: always
+  only:
+    - main
+    - merge_requests
+  needs: ["materialize_temp_splits"]
+  allow_failure: false  # Hard fail if contamination is high
+
+# Job 3: Rematerialize clean splits (excludes flagged IDs)
+rematerialize_clean_splits:
+  stage: security  # or 'qa' if using Option A
+  image: ruby:3.2
+  before_script:
+    - bundle config set --local path 'vendor/bundle'
+    - bundle install --jobs 4
+    - *git_crypt_unlock
+  script:
+    - mkdir -p data/splits_clean
+    - |
+      if [ -f exclusion_ids.txt ] && [ -s exclusion_ids.txt ]; then
+        echo "🧹 Rematerializing clean splits with exclusions..."
+        bundle exec ruby bin/splitter.rb \
+          --manifest manifest/manifest.jsonl \
+          --pin $(date +%Y-%m) \
+          --exclude exclusion_ids.txt \
+          --output-dir data/splits_clean \
+          --materialize all
+      else
+        echo "✅ No exclusions needed, copying temp splits..."
+        cp tmp/splits/*.jsonl data/splits_clean/
+      fi
+    - ls -lh data/splits_clean/
+  artifacts:
+    paths:
+      - data/splits_clean/train.jsonl
+      - data/splits_clean/val.jsonl
+      - data/splits_clean/test.jsonl
+      - contamination_report.json
+    expire_in: 30 days
+  only:
+    - main
+  needs: ["contamination_guard"]
+  when: on_success  # Only run if contamination_guard passed
+
+# Job 4: Deploy clean splits (atomic symlink flip)
+deploy_splits:
+  stage: release  # or create 'deploy' stage after 'build'
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache coreutils  # For ln -sf
+  script:
+    - |
+      echo "🔄 Atomic symlink flip to clean splits..."
+      mkdir -p data/splits
+      ln -sf splits_clean/train.jsonl data/splits/train.jsonl
+      ln -sf splits_clean/val.jsonl data/splits/val.jsonl
+      ln -sf splits_clean/test.jsonl data/splits/test.jsonl
+      ls -lh data/splits/
+      echo "✅ Clean splits deployed"
+  only:
+    - main
+  needs: ["rematerialize_clean_splits"]
+  when: manual  # Require explicit approval before production flip
+
+# NEW: Vault encryption verification (ensures vault/ is encrypted in Git history)
+vault_encryption_check:
+  stage: security
+  image: ruby:3.2
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq git-crypt
+  script:
+    - |
+      echo "🔍 Verifying vault/ encryption in Git..."
+      # Check .gitattributes has filter=git-crypt for vault/**
+      if ! grep -q 'vault/\*\* filter=git-crypt' .gitattributes; then
+        echo "❌ ERROR: .gitattributes missing 'vault/** filter=git-crypt'"
+        exit 1
+      fi
+      # Check that vault/ files are actually encrypted in repo (before unlock)
+      if git-crypt status | grep -q 'not encrypted:.*vault/'; then
+        echo "❌ ERROR: Found unencrypted files in vault/"
+        git-crypt status | grep 'not encrypted:.*vault/'
+        exit 1
+      fi
+      echo "✅ vault/ properly encrypted in Git"
+  allow_failure: false
+
+# ============================================================================
+# Stage: Monitor
+# ============================================================================ 
+
+metrics_watch:
+  stage: monitor
+  script:
+    - bin/metrics_watcher.rb --config config/alerts.yml --manifest data/manifest.jsonl
+  only:
+    - schedules  # Triggered by pipeline schedules (daily/weekly)
+  allow_failure: true  # Don't block pipeline if alerts fire
+
+
+# ============================================================================
+# Stage: Build
+# ============================================================================
+build_artifacts:
+  stage: build
+  image: ruby:3.2
+  before_script:
+    - bundle config set --local path 'vendor/bundle'
+    - bundle install --jobs 4
+  script:
+    - mkdir -p build
+    - tar -czf build/mboxMinerva-${CI_COMMIT_SHORT_SHA}.tar.gz lib/ bin/ docs/ spec/ Gemfile Gemfile.lock README.md LICENSE .gitattributes
+  artifacts:
+    paths:
+      - build/
+    expire_in: 30 days
+  only:
+    - main
+    - tags
+
+# ============================================================================
+# Stage: Release (manual trigger on tags only)
+# ============================================================================
+release:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  script:
+    - echo "Creating release for $CI_COMMIT_TAG"
+  release:
+    tag_name: '$CI_COMMIT_TAG'
+    description: 'Release $CI_COMMIT_TAG - mboxMinerva privacy-safe email LLM pipeline'
+    assets:
+      links:
+        - name: 'mboxMinerva tarball'
+          url: '${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/download?job=build_artifacts'
+  only:
+    - tags
+  when: manual
+
+# ============================================================================
+# Key changes from patchset:
+# 1. Added .git_crypt_unlock YAML anchor for reusable before_script
+# 2. rspec, split_integrity jobs now unlock vault before tests
+# 3. New vault_encryption_check job verifies .gitattributes + Git status
+# 4. Requires CI/CD variables: GPG_PRIVATE_KEY, GPG_PASSPHRASE
+# ============================================================================
+
+# ==============================================================================
+# OPTIONAL: Weekly scheduled contamination checks
+# Add this at end of file:
+# ==============================================================================
+scheduled_contamination_check:
+  stage: security
+  image: ruby:3.2
+  before_script:
+    - bundle config set --local path 'vendor/bundle'
+    - bundle install --jobs 4
+    - *git_crypt_unlock
+  script:
+    - mkdir -p tmp/splits
+    - |
+      bundle exec ruby bin/splitter.rb \
+        --manifest manifest/manifest.jsonl \
+        --pin $(date +%Y-%m) \
+        --output-dir tmp/splits \
+        --materialize all
+    - |
+      bundle exec ruby bin/contamination_guard.rb \
+        --train tmp/splits/train.jsonl \
+        --val tmp/splits/val.jsonl \
+        --test tmp/splits/test.jsonl \
+        --threshold 0.70 \
+        --policy quarantine_test \
+        --output weekly_contamination_report.json
+    - |
+      # Email/Slack alert if contamination spikes (integrate notification service)
+      CONTAM_PCT=$(jq -r '.summary.contamination_pct' weekly_contamination_report.json)
+      echo "Weekly contamination: ${CONTAM_PCT}%"
+  artifacts:
+    paths:
+      - weekly_contamination_report.json
+    expire_in: 90 days
+  only:
+    - schedules  # Triggered by GitLab scheduled pipelines (Settings → CI/CD → Schedules)
+
+# ==============================================================================
+# CI/CD VARIABLE REQUIREMENTS (already have GPG keys; may need to add):
+# ==============================================================================
+# - CONTAMINATION_THRESHOLD: "1.0" (percent, default 1.0%)
+# - CONTAMINATION_POLICY: "quarantine_test" (or "quarantine_both" / "coassign")
+# - SHINGLE_SIZE: "5" (w-gram size, default 5)
+# - JACCARD_THRESHOLD: "0.70" (similarity threshold, default 0.70)
