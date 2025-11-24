@@ -11,6 +11,7 @@ Then go to `~/.local/share/containers/storage/volumes/gitlab-runner-config/_data
 [[runners]]
   [runners.docker]
     pull_policy = ["if-not-present"]
+    allowed_pull_policies: ["always", "if-not-present", "never"]
 ```
 This will configure gitlab to use local images
 
