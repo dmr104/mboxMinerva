@@ -13,8 +13,9 @@ stages:
   - build_infra
   - app_test
 
-# Disable per-build isolation so that we can see the previous images on the host
-FF_NETWORK_PER_BUILD: "false"
+variables:
+  # Disable per-build isolation so that we can see the previous images on the host
+  FF_NETWORK_PER_BUILD: "false"
 
 
 # JOB 1: The Builder
