@@ -1,3 +1,14 @@
+# .gitlab-ci.yml — mboxMinerva CI/CD Pipeline with git-crypt enforcement
+# ============================================================================
+# Stages: lint → test → security → build → release
+# New: git-crypt unlock before any job that touches vault/ or PII modules
+# Required CI/CD Variables (Settings → CI/CD → Variables):
+#   - GPG_PRIVATE_KEY: base64-encoded GPG private key (git-crypt unlock)
+#   - GPG_PASSPHRASE: passphrase for the GPG key (if protected)
+# ============================================================================
+
+
+
 stages:
   - build_infra
   - app_test
@@ -15,7 +26,7 @@ rebuild_ruby_base:
     - echo "Detected changes in build context. Rebuilding base image on Host..."
     # This 'docker build' actually runs on the HOST machine because of the socket mapping.
     # It updates the 'ruby:local-patched' tag in the host's storage.
-    - docker build -t ruby:local-patched -f docker/Dockerfile .
+    - podman build -t ruby:local-patched -f docker/Dockerfile .
   rules:
     # CONDITION: Only run if these files change in the commit/MR
     - changes:

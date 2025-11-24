@@ -14,5 +14,5 @@ Then go to `~/.local/share/containers/storage/volumes/gitlab-runner-config/_data
 ```
 This will configure gitlab to use local images
 
-Observe that in .gitlab-ci.yml we refer to this image
+Observe that in .gitlab-ci.yml we refer to this image, which is a local one.  Note that this solution is probably not what you want in a production environment, where you ought to push your image (which is tagged uniquely and immutably, e.g. "app:1.2.3_\<SHA\>") to a private container repository from the dev environment and the pull it into your production one. 
 
