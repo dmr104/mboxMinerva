@@ -13,6 +13,10 @@ stages:
   - build_infra
   - app_test
 
+# Disable per-build isolation so that we can see the previous images on the host
+FF_NETWORK_PER_BUILD: "false"
+
+
 # JOB 1: The Builder
 # Usage: Builds the image ONLY if you touch files in 'docker/'
 rebuild_ruby_base:
@@ -26,7 +30,7 @@ rebuild_ruby_base:
     - echo "Detected changes in build context. Rebuilding base image on Host..."
     # This 'docker build' actually runs on the HOST machine because of the socket mapping.
     # It updates the 'ruby:local-patched' tag in the host's storage.
-    - podman build -t ruby:local-patched -f docker/Dockerfile .
+    - podman build --layers -t ruby:local-patched -f docker/Dockerfile .
   rules:
     # CONDITION: Only run if these files change in the commit/MR
     - changes:
@@ -42,7 +46,10 @@ run_tests:
   stage: app_test
   # Because of pull_policy = ["if-not-present"], the Runner looks for this tag
   # on the host first. If Job 1 ran, it sees the new one. If Job 1 skipped, it sees the old one.
-  image: ruby:local-patched
+  image: 
+     name: ruby:local-patched
+     # CRITICAL: Tell Gitlab to look locally first, never trying to pull from Docker Hub
+     pull-policy: ["if-not-present", "never"] 
   script:
     - ruby -v
     - echo "Running tests in the custom container..."
