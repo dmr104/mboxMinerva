@@ -54,7 +54,7 @@ I logged in to *OpenBao* web interface as root (although in a working company/co
 2.  Click **Enable new method** → Select **JWT/OIDC** → leave path as `jwt/` → **Enable Method**.
 3.  Click on the newly created `auth/jwt/` method.
 4.  Click **Configure** (tab).
-    *   **OIDC Discovery URL:** `https://your-gitlab-domain.com` (Must be reachable by OpenBao). I used `http://192.168.1.168:8080`
+    *   **OIDC Discovery URL:** `https://your-gitlab-domain.com` (Must be reachable by OpenBao). I used `http://192.168.1.168:8080`. This tells OpenBao to connect to GitLab's well-known generic public endpoint, download the current public keys, and use them to verify the signature on the JWT, which only carries a key ID (`kid`) which is a pointer informing openbao to use a particular public key from the issuer's set.  
     *   **Zero Trust/Security:** Ensure **Default Role** is empty (deny by default).
     *   **Bound issuer:** I used `http://192.168.1.168:8080`
     *   **Advanced Settings (optional but recommended):** slightly confusingly hidden, but usually you usually leave "OIDC Client ID" empty for GitLab unless you configured a specific app.

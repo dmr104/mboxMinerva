@@ -38,7 +38,7 @@ The command will ask you questions. Your answers matter because of **Container N
 
 1.  **Enter the GitLab instance URL:**
     *   *Wrong Answer:* `http://localhost` (This refers to the *runner container itself*, not your PC).
-    *   *Correct Answer:* `http://gitlab:8080` (Use the **container name** of your GitLab server; Podman resolves this name over the shared network presumably if aardvark-dns is installed: which, as it was not available on deepin apt package manager on my system, I resorted to doing `http://192.168.1.168:8080` where this was the internal ip of my network card).
+    *   *Correct Answer:* `http://gitlab:8080` (If you can use the **container name** of your GitLab server; Podman resolves this name over the shared network presumably if aardvark-dns is installed: which, as it was not available on deepin apt package manager on my system, I resorted to doing `http://192.168.1.168:8080` where this was the internal ip of my network card).
 2.  **Enter the registration token:**
     *   Paste the `glrt-...` token you copied earlier.
 3.  **Enter a description:** `podman-runner` (aesthetic only).
@@ -57,3 +57,14 @@ Be careful not to register your Runner more than once, as each time you do will 
 
 ## Useful commands
 * `podman exec -it gitlab-runner gitlab-runner list` will display (any) tags set up for gitlab-runner plus other info
+
+## How to tell self-hosted gitlab about the existence of a local git repo
+I already have an up-to-date checked-out git clone on my local machine from github.  What I would like to do is to set another remote to push to the local self-hosted GitLab.  How do I achieve this?
+
+#### What is oauth2?  
+
+In this context, `oauth2` is a type of username that GitLab expects when you authentify over HTTP with a personal access token, which is a long string which is to be used as the password. So `http://oauth2:YOUR_TOKEN@host/namespace/repo.git` tells Git to log in.  
+
+You can create the token on GitLab via **User Settings** -> **Access Tokens** -> **scopes: `write_repository`. The API box is to grant full access to GitLab's REST API, which is not needed for just `git push`.  I selected visbility level as `Private`.
+
+As I was logged in to github as root I did `git remote add http://oauth2:MY_PERSONAL_ACCESS_TOKEN@localhost:8080/root/minerva.git`
