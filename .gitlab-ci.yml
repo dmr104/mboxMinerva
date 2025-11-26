@@ -25,8 +25,6 @@ variables:
     # This generates the JWT. 
     BAO_VAULT_ID:
       aud: "my-super-secure-app-id"  # The 'aud' MUST match OpenBao's 'bound-audiences'
-    variables:
-      VAULT_ROLE: "gitlab-dev-runner-role"
 
   script: 
     - echo "Authentifying to OpenBao..."
@@ -46,6 +44,7 @@ ghcr_dev:
   stage: build_infra
   variables:
     PATH_OF_SECRET: "github-creds"   # This must match the name of our secret with OpenBao's secret engine.
+    VAULT_ROLE: "gitlab-dev-runner-role"
 
 # JOB 1: The Builder
 # Usage: Builds the image ONLY if you touch files in 'docker/'
