@@ -34,9 +34,9 @@ variables:
     - export VAULT_TOKEN=$(vault write -field=token auth/jwt/login role=$VAULT_ROLE jwt=$BAO_VAULT_ID)
 
     # 2. Fetch the secret
-    - echo "Fetching secrets from $PATH_OF_SECRET..."
-    - GHCR_CREDS_DEV=$(vault kv get -token=$VAULT_TOKEN -field=token -mount=secret $PATH_OF_SECRET)
-    - echo "I have the secret! It is ${GHCR_CREDS_DEV:0:3}***"
+    - "echo \"Fetching secrets from $PATH_OF_SECRET\""
+    - GHCR_CREDS_DEV=$(vault kv get -field=token -mount=secret $PATH_OF_SECRET)
+    - "echo \"I have the secret! It is ${GHCR_CREDS_DEV:0:3}***\""
 
 # EXTRACT ghcr secret
 ghcr_dev:
