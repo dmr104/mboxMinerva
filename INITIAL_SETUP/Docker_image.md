@@ -52,7 +52,7 @@ I logged in to *OpenBao* web interface as root (although in a working company/co
 #### C. Enable & Configure JWT Auth
 1.  Click **Access** (top navigation) → **Auth Methods**.
 2.  Click **Enable new method** → Select **JWT/OIDC** → leave path as `jwt/` → **Enable Method**.
-3.  Click on the newly created `auth/jwt/` method.
+3.  Click on the newly created `jwt/` method.
 4.  Click **Configure** (tab).
     *   **OIDC Discovery URL:** `https://your-gitlab-domain.com` (Must be reachable by OpenBao). I used `http://192.168.1.168:8080`. This tells OpenBao to connect to GitLab's well-known generic public endpoint, download the current public keys, and use them to verify the signature on the JWT, which only carries a key ID (`kid`) which is a pointer informing openbao to use a particular public key from the issuer's set.  
     *   **Zero Trust/Security:** Ensure **Default Role** is empty (deny by default).
@@ -61,10 +61,10 @@ I logged in to *OpenBao* web interface as root (although in a working company/co
 5.  Click **Save**.
 
 #### D. Create the Role (The "Who is allowed" rule)
-Remain in the `auth/jwt/` method screen.
+Remain in the `jwt/` method screen.
 1.  Click **Create role** (or "Roles" tab → Create).
     *   **Name:** `gitlab-dev-runner-role`
-    *   **Type:** `auth/jwt`
+    *   **Type:** `jwt`
     *   **Bound Audiences:** `my-super-secure-app-id` (Must match the `aud:` in your GitLab CI file exactly).
     *   **User Claim:** `sub` (or `user_login` or `project_path` - this keys the internal identity).
     *   **Groups Claim:** `project_path` (Useful for logging).
@@ -76,4 +76,8 @@ Remain in the `auth/jwt/` method screen.
         *   By choosing `sub` in development, this tells OpenBao to use the JWT's subject claim as the caller's identity so that whatever is within `sub` becomes the principle name OpenBao uses for identity and policy decisions.
 2.  Click **Save**.
 
-If this works for you then great.  But I found that the **Roles** tab was missing under **Access** -> **Auth Methods** -> **auth/jwt** -> **Roles**.  So I recursed to using `podman exec -it systemd-openbao /bin/sh` and then `bao login <root password>` and then I created a role called **"gitlab-dev"** by doing `bao write auth/jwt/role/gitlab-dev-runner-role role_type=jwt user_claim=sub bound_audiences="my-super-secure-app-id" bound_issuer="192.168.1.168:8080" policies="gitlab-dev-policy"`
+If this works for you then great.  But I found that the **Roles** tab was missing under **Access** -> **Auth Methods** -> **jwt** -> **Roles**.  So I recursed to using `podman exec -it systemd-openbao /bin/sh` and then `bao login <root password>` and then I created a role called **"gitlab-dev"** by doing `bao write auth/jwt/role/gitlab-dev-runner-role role_type=jwt user_claim=sub bound_audiences="my-super-secure-app-id" bound_issuer="http://192.168.1.168:8080" policies="gitlab-dev-policy"`
+
+Useful commands are `bao auth list` and `bao auth enable jwt`.
+
+
