@@ -31,11 +31,11 @@ variables:
 
     # 1. Login to OpenBao
     # We send the variable $BAO_VAULT_ID to OpenBao via **`id_tokens`** which is a signed JWT embedding with aud (audience).
-    - VAULT_TOKEN=$(vault write -field=token auth/jwt/login role=$VAULT_ROLE jwt=$BAO_VAULT_ID)
+    - export VAULT_TOKEN=$(vault write -field=token auth/jwt/login role=$VAULT_ROLE jwt=$BAO_VAULT_ID)
 
     # 2. Fetch the secret
     - echo "Fetching secrets from $PATH_OF_SECRET..."
-    - GHCR_CREDS_DEV=$(vault kv get -field=api_key $PATH_OF_SECRET)
+    - GHCR_CREDS_DEV=$(vault kv get -field=password -mount=secret $PATH_OF_SECRET)
     - echo "I have the secret! It is ${GHCR_CREDS_DEV:0:3}***"
 
 # EXTRACT ghcr secret
@@ -43,7 +43,7 @@ ghcr_dev:
   extends: .secret_fetcher
   stage: build_infra
   variables:
-    PATH_OF_SECRET: "secret/github-creds"   # This must match the name of our secret with OpenBao's secret engine.
+    PATH_OF_SECRET: "github-creds"   # This must match the name of our secret with OpenBao's secret engine.
     VAULT_ROLE: "gitlab-dev-runner-role"
 
 # JOB 1: The Builder
