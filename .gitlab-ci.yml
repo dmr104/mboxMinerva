@@ -35,7 +35,7 @@ variables:
 
     # 2. Fetch the secret
     - echo "Fetching secrets from $PATH_OF_SECRET..."
-    - GHCR_CREDS_DEV=$(vault kv get -field=api_key $VAULT_ADDR/v1/$PATH_OF_SECRET)
+    - GHCR_CREDS_DEV=$(vault kv get -field=api_key $PATH_OF_SECRET)
     - echo "I have the secret! It is ${GHCR_CREDS_DEV:0:3}***"
 
 # EXTRACT ghcr secret
