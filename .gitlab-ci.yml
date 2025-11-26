@@ -31,7 +31,7 @@ variables:
 
     # 1. Login to OpenBao
     # We send the variable $BAO_VAULT_ID to OpenBao via **`id_tokens`** which is a signed JWT embedding with aud (audience).
-    - VAULT_TOKEN=$(podman exec systemd-openbao "/bin/vault write -field=token auth/jwt/login role=\"$VAULT_ROLE\"" jwt=\"$BAO_VAULT_ID\"")
+    - VAULT_TOKEN=$(podman exec systemd-openbao "/bin/vault write -field=token auth/jwt/login role=\"$VAULT_ROLE\" jwt=\"$BAO_VAULT_ID\"")
 
     # 2. Fetch the secret
     - echo "Fetching secrets from $PATH_OF_SECRET..."
