@@ -31,11 +31,11 @@ variables:
 
     # 1. Login to OpenBao
     # We send the variable $BAO_VAULT_ID to OpenBao via **`id_tokens`** which is a signed JWT embedding aud (audience).
-    - VAULT_TOKEN=$(vault write -field=token auth/jwt/login role=$VAULT_ROLE jwt=$BAO_VAULT_ID)
+    - VAULT_TOKEN=$(/bin/vault write -field=token auth/jwt/login role=$VAULT_ROLE jwt=$BAO_VAULT_ID)
 
     # 2. Fetch the secret
     - echo "Fetching secrets from $PATH_OF_SECRET..."
-    - GHCR_CREDS_DEV=$(vault kv get -field=api_key $PATH_OF_SECRET)
+    - GHCR_CREDS_DEV=$(/bin/vault kv get -field=api_key $PATH_OF_SECRET)
     - echo "I have the secret! It is ${GHCR_CREDS_DEV:0:3}***"
 
 # EXTRACT ghcr secret
