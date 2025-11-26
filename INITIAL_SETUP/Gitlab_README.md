@@ -16,11 +16,7 @@ Before running the command, you need a **Registration Token** from your *running
 *   Click **Create**.
 *   **COPY the token** (it starts with `glrt-`).
 
-Then, although I find that this is not always necessary, and you might skip this step; as we are using podman you *may* add the following to the file `~/.local/share/containers/storage/volumes/gitlab-runner-config/_data/config.yml`:
-```toml
-  [runners.feature_flags]
-    FF_NETWORK_PER_BUILD = false
-```
+The following steps will generate configuration information within `~/.local/share/containers/storage/volumes/gitlab-runner-config/_data/config.toml`.
 
 ### 2. The Logic (The "Phone Call")
 You cannot run this command on your *host machine*. You must run it *inside* the runner container so it saves the config to its own internal `config.toml`.
@@ -46,7 +42,7 @@ The command will ask you questions. Your answers matter because of **Container N
 2.  **Enter the registration token:**
     *   Paste the `glrt-...` token you copied earlier.
 3.  **Enter a description:** `podman-runner` (aesthetic only).
-4.  **Enter tags:** `docker` (must match your job tags).
+4.  **Enter tags:** `docker` (this is optional - your job tags configured under gitlab-runner must match the job tags you put under `tags:` in each .gitlab-ci.yml job, or that job will never be picked up by that runner). You might choose tags: [podman, rootless].  Take your pick. 
 5.  **Enter optional maintenance note:** (Skip).
 6.  **Enter an executor:**
     *   **`docker`** (This is the one you want. It means "When I get a job, create a *new* throwaway container to run it").
@@ -58,3 +54,6 @@ Because the Runner needs to generate cryptographic keys to talk to the Server se
 
 ## Caution.
 Be careful not to register your Runner more than once, as each time you do will create an addition [[runners]] section within your `config.toml` file, each superceding the previous.
+
+## Useful commands
+* `podman exec -it gitlab-runner gitlab-runner list` will display (any) tags set up for gitlab-runner plus other info

@@ -16,7 +16,36 @@ stages:
 variables:
   # Disable per-build isolation so that we can see the previous images on the host
   FF_NETWORK_PER_BUILD: "false"
+  VAULT_ADDR: "http://192.168.1.168:8200"
 
+# secret_fetcher (the gitlab-runner will spin up separate job containers on the host using a podman executor, so we NEED an image for those job containers "alpine:latest")
+.secret_fetcher:
+  image: alpine:latest # Lightweight image
+  id_tokens:
+    # This generates the JWT. 
+    BAO_VAULT_ID:
+      aud: "my-super-secure-app-id"  # The 'aud' MUST match OpenBao's 'bound-audiences'
+    variables:
+      VAULT_ROLE: "gitlab-dev-runner-role"
+
+  script: 
+    - echo "Authentifying to OpenBao..."
+
+    # 1. Login to OpenBao
+    # We send the variable $BAO_VAULT_ID to OpenBao via **`id_tokens`** which is a signed JWT embedding aud (audience).
+    - VAULT_TOKEN=$(vault write -field=token auth/jwt/login role=$VAULT_ROLE jwt=$BAO_VAULT_ID)
+
+    # 2. Fetch the secret
+    - echo "Fetching secrets from $PATH_OF_SECRET..."
+    - GHCR_CREDS_DEV=$(vault kv get -field=api_key $PATH_OF_SECRET)
+    - echo "I have the secret! It is ${GHCR_CREDS_DEV:0:3}***"
+
+# EXTRACT ghcr secret
+ghcr_dev:
+  extends: .secret_fetcher
+  stage: build_infra
+  variables:
+    PATH_OF_SECRET: "github-creds"   # This must match the name of our secret with OpenBao's secret engine.
 
 # JOB 1: The Builder
 # Usage: Builds the image ONLY if you touch files in 'docker/'
@@ -34,12 +63,13 @@ rebuild_ruby_base:
     - podman build --layers -t ruby:local-patched -f docker/Dockerfile .
   rules:
     # CONDITION: Only run if these files change in the commit/MR
-    - changes:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      changes:
         - docker/Dockerfile
         - docker/**/*
     # FALLBACK: Allow manual triggering in the UI if you ever need to force a rebuild (e.g. clean host)
-    - when: manual
-      allow_failure: true
+      when: manual                # <--- You must click "Play" in the UI.
+      allow_failure: false        # The pipeline blocks here until you tell it to proceed.
 
 # JOB 2: The Consumer
 # Usage: Runs your actual tests using the image from Job 1
