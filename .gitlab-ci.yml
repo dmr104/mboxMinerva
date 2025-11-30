@@ -23,8 +23,9 @@ variables:
 # secret_fetcher (the gitlab-runner will spin up separate job containers on the host using a podman executor, so we NEED an image for those job containers "alpine:latest")
 .secret_fetcher:
   image: openbao/openbao:latest # Gives us the `bao` command
-  PATH_OF_SECRET: "github-creds"   # This must match the name of our secret with OpenBao's secret engine.
-  VAULT_ROLE: "gitlab-dev-runner-role"
+  variables:
+    PATH_OF_SECRET: "github-creds"   # This must match the name of our secret with OpenBao's secret engine.
+    VAULT_ROLE: "gitlab-dev-runner-role"
   id_tokens:
     # This generates the JWT. 
     BAO_VAULT_ID:
