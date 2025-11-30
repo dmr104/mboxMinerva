@@ -40,7 +40,7 @@ variables:
 
     # 2. Fetch the secret
     - echo "Fetching secrets from ${PATH_OF_SECRET}"
-    - export GHCR_PAT=$(vault kv get -mount=secret $PATH_OF_SECRET)
+    - export GHCR_PAT=$(vault kv get -mount=secret -field=pat $PATH_OF_SECRET)
     - echo "I have the secret! It is $(echo "${GHCR_PAT}" | cut -c 1-3)xxx"
 # EXTRACT ghcr secret
 ghcr_dev:

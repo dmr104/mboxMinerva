@@ -78,7 +78,7 @@ Remain in the `jwt/` method screen.
 
 If this works for you then great.  But I found that the **Roles** tab was missing under **Access** -> **Auth Methods** -> **jwt** -> **Roles**.  So I recursed to using `podman exec -it systemd-openbao /bin/sh` and then `bao login <root password>` and then I created a role called **"gitlab-dev"** by doing `bao write auth/jwt/role/gitlab-dev-runner-role role_type=jwt user_claim=sub bound_audiences="my-super-secure-app-id" bound_issuer="http://192.168.1.168:8080" policies="gitlab-dev-policy"`
 
-Useful commands are `bao auth list` and `bao auth enable jwt`.
+Useful commands are `bao auth list` and `bao auth enable jwt` and `bao list auth/jwt/role`.
 
 ## .gitlab-ci.yml
 My .gitlab-ci.yml at this stage looks like:
