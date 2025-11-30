@@ -60,7 +60,7 @@ rebuild_ruby_base:
     # Disable TLS since we are talking to a local Unix socket
     DOCKER_TLS_CERTDIR: ""
   script:
-    - reference [.secret_fetcher, script]
+    - !reference [.secret_fetcher, script]
     - unset VAULT_TOKEN
     - echo "I have the GHCR_PAT! It is $(echo "{$GHCR_PAT}" | cut -c 1-3)xxx"
     - echo "Detected changes in build context. Rebuilding base image on Host..."
