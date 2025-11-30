@@ -80,4 +80,97 @@ If this works for you then great.  But I found that the **Roles** tab was missin
 
 Useful commands are `bao auth list` and `bao auth enable jwt`.
 
+## .gitlab-ci.yml
+My .gitlab-ci.yml at this stage looks like:
+```yaml
+stages:
+  - build_infra
+  - app_test
+
+variables:
+  # Disable per-build isolation so that we can see the previous images on the host
+  FF_NETWORK_PER_BUILD: "false"
+  VAULT_ADDR: "http://192.168.1.168:8200"
+
+# secret_fetcher (the gitlab-runner will spin up separate job containers on the host using a podman executor, so we NEED an image for those job containers "alpine:latest")
+.secret_fetcher:
+  image: openbao/openbao:latest # Gives us the `bao` command
+  id_tokens:
+    # This generates the JWT. 
+    BAO_VAULT_ID:
+      aud: "my-super-secure-app-id"  # The 'aud' MUST match OpenBao's 'bound-audiences'
+
+  script: 
+    - echo "Authentifying to OpenBao..."
+
+    # 1. Login to OpenBao
+    # We send the variable $BAO_VAULT_ID to OpenBao via **`id_tokens`** which is a signed JWT embedding with aud (audience).
+    - export VAULT_TOKEN=$(vault write -field=token auth/jwt/login role=$VAULT_ROLE jwt=$BAO_VAULT_ID)
+    - "echo \"I have the VAULT_TOKEN! It is ${GHCR_CREDS_DEV:0:3}***\""
+
+    # 2. Fetch the secret
+    - "echo \"Fetching secrets from $PATH_OF_SECRET\""
+    - GHCR_CREDS_DEV=$(vault kv get -mount=secret $PATH_OF_SECRET)
+    - "echo \"I have the secret!\""
+# EXTRACT ghcr secret
+ghcr_dev:
+  extends: .secret_fetcher
+  stage: build_infra
+  variables:
+    PATH_OF_SECRET: "github-creds"   # This must match the name of our secret with OpenBao's secret engine.
+    VAULT_ROLE: "gitlab-dev-runner-role"
+
+# JOB 1: The Builder
+# Usage: Builds the image ONLY if you touch files in 'docker/'
+rebuild_ruby_base:
+  stage: build_infra
+  # Use generic docker client; it talks to your mapped /var/run/docker.sock (podman)
+  image: docker:cli
+  variables:
+    # Disable TLS since we are talking to a local Unix socket
+    DOCKER_TLS_CERTDIR: ""
+  script:
+    - echo "Detected changes in build context. Rebuilding base image on Host..."
+    # This 'docker build' actually runs on the HOST machine because of the socket mapping.
+    # It updates the 'ruby:local-patched' tag in the host's storage.
+    - podman build --layers -t ruby:local-patched -f docker/Dockerfile .
+  rules:
+    # CONDITION: Only run if these files change in the commit/MR
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      changes:
+        - docker/Dockerfile
+        - docker/**/*
+    # FALLBACK: Allow manual triggering in the UI if you ever need to force a rebuild (e.g. clean host)
+      when: manual                # <--- You must click "Play" in the UI.
+      allow_failure: false        # The pipeline blocks here until you tell it to proceed.
+
+# JOB 2: The Consumer
+# Usage: Runs your actual tests using the image from Job 1
+run_tests:
+  stage: app_test
+  # Because of pull_policy = ["if-not-present"], the Runner looks for this tag
+  # on the host first. If Job 1 ran, it sees the new one. If Job 1 skipped, it sees the old one.
+  image: 
+     name: ruby:local-patched
+  script:
+    - ruby -v
+    - echo "Running tests in the custom container..."
+```
+
+## How `podman push ...` works
+
+To put things into perspective and to manually test,
+
+`podman login -u <github_user_or organization_name> -p <github_Personal_authentification_token> ghcr.io`
+
+will log podman in to ghcr.io; and 
+
+`podman push ruby:local-patched ghcr.io/<gh_user_name>/ruby:remote-patched`
+
+will push the image which our pipeline ought to have already built.
+
+## Automated pushing
+
+Our task now is to automate the task of pushing to the github container repository.
+
 

@@ -51,6 +51,9 @@ ghcr_dev:
 rebuild_ruby_base:
   stage: build_infra
   # Use generic docker client; it talks to your mapped /var/run/docker.sock (podman)
+  variables:
+    GH_USER_NAME: "dmr104"
+    CONTAINER_REGISTRY: "ghcr.io"
   image: docker:cli
   variables:
     # Disable TLS since we are talking to a local Unix socket
@@ -60,6 +63,12 @@ rebuild_ruby_base:
     # This 'docker build' actually runs on the HOST machine because of the socket mapping.
     # It updates the 'ruby:local-patched' tag in the host's storage.
     - podman build --layers -t ruby:local-patched -f docker/Dockerfile .
+    - "echo \"Authentifying to $CONTAINER_REGISTRY\"" 
+    - podman login -u $GH_USER_NAME -p $GHCR_CREDS_DEV $CONTAINER_REGISTRY
+    - "echo \"Authentified via podman to $CONTAINER_REGISTRY\"" 
+    - "echo \"Pushing ruby:remote-patched to $CONTAINER_REGISTRY\"" 
+    - podman push ruby:local-patched $CONTAINER_REGISTRY/$GH_USER_NAME/ruby:remote-patched
+    - "echo \"ruby:remote-patched is pushed to $CONTAINER_REGISTRY\"" 
   rules:
     # CONDITION: Only run if these files change in the commit/MR
     - if: '$CI_COMMIT_BRANCH == "main"'
