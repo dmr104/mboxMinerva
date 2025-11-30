@@ -37,9 +37,9 @@ variables:
     - "echo \"I have the VAULT_TOKEN! It is ${GHCR_CREDS_DEV:0:3}***\""
 
     # 2. Fetch the secret
-    - "echo \"Fetching secrets from $PATH_OF_SECRET\""
+    - echo "Fetching secrets from ${PATH_OF_SECRET}"
     - GHCR_CREDS_DEV=$(vault kv get -mount=secret $PATH_OF_SECRET)
-    - "echo \"I have the secret!\""
+    - echo "I have the secret!"
 # EXTRACT ghcr secret
 ghcr_dev:
   extends: .secret_fetcher
@@ -62,14 +62,14 @@ rebuild_ruby_base:
     # This 'docker build' actually runs on the HOST machine because of the socket mapping.
     # It updates the 'ruby:local-patched' tag in the host's storage.
     - docker build -t ruby:local-patched -f docker/Dockerfile .
-    - "echo \"Have built ruby image from Dockerfile\""     
+    - echo "Have built ruby image from Dockerfile"     
     - docker tag ruby:local-patched $CONTAINER_REGISTRY/$GH_USER_NAME/ruby:remote-patched
-    - "echo \"Authentifying to $CONTAINER_REGISTRY\"" 
-    - docker login -u $GH_USER_NAME -p $GHCR_CREDS_DEV $CONTAINER_REGISTRY
-    - "echo \"Authentified via docker to $CONTAINER_REGISTRY\"" 
-    - "echo \"Pushing ruby:local-patched to $CONTAINER_REGISTRY\"" 
-    - podman push $CONTAINER_REGISTRY/$GH_USER_NAME/ruby:remote-patched
-    - "echo \"ruby:local-patched is pushed to $CONTAINER_REGISTRY/$GH_USER_NAME/ruby:remote-patched\"" 
+    - echo "Authentifying to ${CONTAINER_REGISTRY}" 
+    - docker login $CONTAINER_REGISTRY -u $GH_USER_NAME -password-stdin $GHCR_CREDS_DEV 
+    - echo "Authentified via docker to ${CONTAINER_REGISTRY}" 
+    - echo "Pushing ruby:local-patched to ${CONTAINER_REGISTRY|" 
+    - docker push $CONTAINER_REGISTRY/$GH_USER_NAME/ruby:remote-patched
+    - echo "ruby:local-patched is pushed to ${CONTAINER_REGISTRY|/${GH_USER_NAME}/ruby:remote-patched" 
   rules:
     # CONDITION: Only run if these files change in the commit/MR
     - if: '$CI_COMMIT_BRANCH == "main"'
