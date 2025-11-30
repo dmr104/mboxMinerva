@@ -61,14 +61,14 @@ rebuild_ruby_base:
     - echo "Detected changes in build context. Rebuilding base image on Host..."
     # This 'docker build' actually runs on the HOST machine because of the socket mapping.
     # It updates the 'ruby:local-patched' tag in the host's storage.
-    - docker build -t ruby:local-patched -f docker/Dockerfile .
-    - echo "Have built ruby image from Dockerfile"     
-    - docker tag ruby:local-patched $CONTAINER_REGISTRY/$GH_USER_NAME/ruby:remote-patched
-    - echo "Authentifying to ${CONTAINER_REGISTRY}" 
-    - docker login $CONTAINER_REGISTRY -u $GH_USER_NAME --password-stdin $GHCR_CREDS_DEV 
+    - docker build -t ruby:local-patched -f docker/Dockerfile . 
+    - echo "Have built ruby image from Dockerfile" 
+    - docker tag ruby:local-patched $CONTAINER_REGISTRY/$GH_USER_NAME/ruby:remote-patched 
+    - "echo \"Authentifying to ${CONTAINER_REGISTRY}\"" 
+    - echo "$GHCR_CREDS_DEV" | docker login $CONTAINER_REGISTRY -u $GH_USER_NAME --password-stdin 
     - echo "Authentified via docker to ${CONTAINER_REGISTRY}" 
     - echo "Pushing ruby:local-patched to ${CONTAINER_REGISTRY|" 
-    - docker push $CONTAINER_REGISTRY/$GH_USER_NAME/ruby:remote-patched
+    - docker push $CONTAINER_REGISTRY/$GH_USER_NAME/ruby:remote-patched 
     - echo "ruby:local-patched is pushed to ${CONTAINER_REGISTRY|/${GH_USER_NAME}/ruby:remote-patched" 
   rules:
     # CONDITION: Only run if these files change in the commit/MR
