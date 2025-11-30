@@ -67,7 +67,7 @@ rebuild_ruby_base:
     - echo "Have built ruby image from Dockerfile" 
     - docker tag ruby:local-patched $CONTAINER_REGISTRY/$GH_USER_NAME/ruby:remote-patched 
     - "echo \"Authentifying to ${CONTAINER_REGISTRY}\"" 
-    - echo "$GHCR_PAT" | docker login "$CONTAINER_REGISTRY" -u "$GH_USER_NAME" --password-stdin 
+    - docker login "$CONTAINER_REGISTRY" -u "$GH_USER_NAME" --password "$GHCR_PAT"
     - "echo \"Authentified via docker to ${CONTAINER_REGISTRY}\"" 
     - "echo \"Pushing ruby:local-patched to ${CONTAINER_REGISTRY}\"" 
     - docker push "$CONTAINER_REGISTRY/$GH_USER_NAME/ruby:remote-patched"
