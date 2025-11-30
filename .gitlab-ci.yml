@@ -60,6 +60,8 @@ rebuild_ruby_base:
     # Disable TLS since we are talking to a local Unix socket
     DOCKER_TLS_CERTDIR: ""
   script:
+    - !reference [.secret_fetcher, script]
+    - unset VAULT_TOKEN
     - echo "Detected changes in build context. Rebuilding base image on Host..."
     # This 'docker build' actually runs on the HOST machine because of the socket mapping.
     # It updates the 'ruby:local-patched' tag in the host's storage.
