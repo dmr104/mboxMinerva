@@ -23,6 +23,8 @@ variables:
 # secret_fetcher (the gitlab-runner will spin up separate job containers on the host using a podman executor, so we NEED an image for those job containers "alpine:latest")
 .secret_fetcher:
   image: openbao/openbao:latest # Gives us the `bao` command
+  PATH_OF_SECRET: "github-creds"   # This must match the name of our secret with OpenBao's secret engine.
+  VAULT_ROLE: "gitlab-dev-runner-role"
   id_tokens:
     # This generates the JWT. 
     BAO_VAULT_ID:
@@ -36,16 +38,10 @@ variables:
     - export VAULT_TOKEN=$(bao write -field=token auth/jwt/login role=$VAULT_ROLE jwt=$BAO_VAULT_ID)
     - echo "I have the VAULT_TOKEN! It is $(echo "{VAULT_TOKEN}" | cut -c 1-3)xxx"
 
-    # 2. Fetch the secret
+    # 2. Fetch the GHCR_PAT secret.
     - echo "Fetching secrets from ${PATH_OF_SECRET}"
     - export GHCR_PAT=$(bao kv get -mount=secret -field=pat $PATH_OF_SECRET)
     - echo "I have the secret! It is $(echo "${GHCR_PAT}" | cut -c 1-3)xxx"
-# EXTRACT ghcr secret
-ghcr_dev:
-  extends: .secret_fetcher
-  variables:
-    PATH_OF_SECRET: "github-creds"   # This must match the name of our secret with OpenBao's secret engine.
-    VAULT_ROLE: "gitlab-dev-runner-role"
 
 # JOB 1: The Builder
 # Usage: Builds the image ONLY if you touch files in 'docker/'
