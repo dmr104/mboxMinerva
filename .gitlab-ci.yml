@@ -10,6 +10,7 @@
 
 
 stages:
+  - get_secrets
   - build_infra
   - app_test
 
@@ -43,6 +44,7 @@ variables:
 # EXTRACT ghcr secret
 ghcr_dev:
   extends: .secret_fetcher
+  stage: get_secrets
   variables:
     PATH_OF_SECRET: "github-creds"   # This must match the name of our secret with OpenBao's secret engine.
     VAULT_ROLE: "gitlab-dev-runner-role"
