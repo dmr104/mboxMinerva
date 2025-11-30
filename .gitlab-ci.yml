@@ -58,7 +58,6 @@ rebuild_ruby_base:
     DOCKER_TLS_CERTDIR: ""
   script:
     - !reference [.secret_fetcher, script]
-    - printf 'GHCR_PAT length: %s;' "${GHCR_PAT}"
     - unset VAULT_TOKEN
     - echo "I have the GHCR_PAT! It is $(echo "{$GHCR_PAT}" | cut -c 1-3)xxx"
     - echo "Detected changes in build context. Rebuilding base image on Host..."
