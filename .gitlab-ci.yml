@@ -40,8 +40,9 @@ variables:
     - echo "I have the VAULT_TOKEN! It is $(echo "{VAULT_TOKEN}" | cut -c 1-3)xxx"
 
     # 2. Fetch the GHCR_PAT secret.
-    - echo "Fetching secrets from ${PATH_OF_SECRET}"
-    - export GHCR_PAT=$(bao kv get -mount=secret -field=pat $PATH_OF_SECRET)
+    - echo "Fetching secrets from $(echo "${PATH_OF_SECRET}")"
+    - MY_TEMP_VAR=$(echo "${PATH_OF_SECRET}")
+    - export GHCR_PAT=$(bao kv get -mount=secret -field=pat $MY_TEMP_VAR)
     - echo "I have the secret! It is $(echo "${GHCR_PAT}" | cut -c 1-3)xxx"
 
 # JOB 1: The Builder
