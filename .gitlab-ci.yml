@@ -70,7 +70,7 @@ rebuild_ruby_base:
     - echo "$GHCR_PAT" | docker login $CONTAINER_REGISTRY -u $GH_USER_NAME --password-stdin 
     - "echo \"Authentified via docker to ${CONTAINER_REGISTRY}\"" 
     - "echo \"Pushing ruby:local-patched to ${CONTAINER_REGISTRY}\"" 
-    - docker push "$CONTAINER_REGISTRY/$GH_USER_NAME/ruby:remote-patched"
+    - docker push "$CONTAINER_REGISTRY"/"$GH_USER_NAME"/ruby:remote-patched
     - "echo \"ruby:local-patched is pushed to ${CONTAINER_REGISTRY/${GH_USER_NAME}/ruby:remote-patched\"" 
   rules:
     # CONDITION: Only run if these files change in the commit/MR
