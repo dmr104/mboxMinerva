@@ -101,8 +101,8 @@ run_tests:
 .deploy-template:
   image: ruby:"$TAG_IMMUTABLE"
   script:
-    - echo "Deploying image ${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:${TAG_IMMUTABLE} "
-    - echo "Targeting environment: ${TARGET_ENV}"
+    - echo "Deploying image ${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:${TAG_IMMUTABLE}"
+    - "echo \"Targeting environment: ${TARGET_ENV}\""
     # - ./deploy_script.sh --env $TARGET_ENV --tag $CI_COMMIT_SHORT_SHA
 
 # DEV Job: Inherits logic, set ENV to 'staging', runs Automatically
