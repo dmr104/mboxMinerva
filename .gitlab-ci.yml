@@ -92,7 +92,7 @@ run_tests:
   # Because of pull_policy = ["if-not-present"], the Runner looks for this tag
   # on the host first. If Job 1 ran, it sees the new one. If Job 1 skipped, it sees the old one.
   image: 
-     name: ruby:"$TAG_IMMUTABLE"
+     name: "${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:${TAG_IMMUTABLE}"
   script:
     - ruby -v
     - echo "Running tests in the custom container..."
@@ -100,7 +100,7 @@ run_tests:
     # - rspec
 
 .deploy_template:
-  image: ruby:"$TAG_IMMUTABLE"
+  image: "${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:${TAG_IMMUTABLE}"
   script:
     - echo "Deploying image ${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:${TAG_IMMUTABLE}"
     - "echo \"Targeting environment: ${TARGET_ENV}\""
