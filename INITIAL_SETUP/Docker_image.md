@@ -80,9 +80,25 @@ If this works for you then great.  But I found that the **Roles** tab was missin
 
 Useful commands are `bao auth list` and `bao auth enable jwt` and `bao list auth/jwt/role`.
 
-## .gitlab-ci.yml
-My .gitlab-ci.yml at this stage looks like:
+## How `podman push ...` works
+
+To put things into perspective and to manually test,
+
+`podman login -u <github_user_or organization_name> -p <github_Personal_authentification_token> ghcr.io`
+
+will log podman in to ghcr.io; and 
+
+`podman push ruby:local-patched ghcr.io/<gh_user_name>/ruby:remote-patched`
+
+will push the image which our pipeline ought to have already built.
+
+## Automated pushing
+
+Our task now is to automate the task of pushing to the github container repository.
+### Our *.gitlab-ci.yml* file thus far.
 ```yaml
+
+
 stages:
   - build_infra
   - app_test
@@ -91,10 +107,15 @@ variables:
   # Disable per-build isolation so that we can see the previous images on the host
   FF_NETWORK_PER_BUILD: "false"
   VAULT_ADDR: "http://192.168.1.168:8200"
+  GH_USER_NAME: "dmr104"
+  CONTAINER_REGISTRY: "ghcr.io"
 
 # secret_fetcher (the gitlab-runner will spin up separate job containers on the host using a podman executor, so we NEED an image for those job containers "alpine:latest")
 .secret_fetcher:
   image: openbao/openbao:latest # Gives us the `bao` command
+  variables:
+    PATH_OF_SECRET: "github-creds"   # This must match the name of our secret with OpenBao's secret engine.
+    VAULT_ROLE: "gitlab-dev-runner-role"
   id_tokens:
     # This generates the JWT. 
     BAO_VAULT_ID:
@@ -105,24 +126,19 @@ variables:
 
     # 1. Login to OpenBao
     # We send the variable $BAO_VAULT_ID to OpenBao via **`id_tokens`** which is a signed JWT embedding with aud (audience).
-    - export VAULT_TOKEN=$(vault write -field=token auth/jwt/login role=$VAULT_ROLE jwt=$BAO_VAULT_ID)
-    - "echo \"I have the VAULT_TOKEN! It is ${GHCR_CREDS_DEV:0:3}***\""
+    - echo "Vault role is $VAULT_ROLE"
+    - export VAULT_TOKEN=$(bao write -field=token auth/jwt/login role=$VAULT_ROLE jwt=$BAO_VAULT_ID)
+    - echo "I have the VAULT_TOKEN! It is $(echo "${VAULT_TOKEN}" | cut -c 1-3)xxx"
 
-    # 2. Fetch the secret
-    - "echo \"Fetching secrets from $PATH_OF_SECRET\""
-    - GHCR_CREDS_DEV=$(vault kv get -mount=secret $PATH_OF_SECRET)
-    - "echo \"I have the secret!\""
-# EXTRACT ghcr secret
-ghcr_dev:
-  extends: .secret_fetcher
-  stage: build_infra
-  variables:
-    PATH_OF_SECRET: "github-creds"   # This must match the name of our secret with OpenBao's secret engine.
-    VAULT_ROLE: "gitlab-dev-runner-role"
+    # 2. Fetch the GHCR_PAT secret.
+    - echo "Fetching secrets from ${PATH_OF_SECRET}"
+    - export GHCR_PAT=$(bao kv get -mount=secret -field=pat $PATH_OF_SECRET)
+    - echo "I have the secret! It is $(echo "${GHCR_PAT}" | cut -c 1-3)xxx"
 
 # JOB 1: The Builder
 # Usage: Builds the image ONLY if you touch files in 'docker/'
 rebuild_ruby_base:
+  extends: .secret_fetcher  # <--- Pulls in variables from .secret_fetcher
   stage: build_infra
   # Use generic docker client; it talks to your mapped /var/run/docker.sock (podman)
   image: docker:cli
@@ -130,10 +146,21 @@ rebuild_ruby_base:
     # Disable TLS since we are talking to a local Unix socket
     DOCKER_TLS_CERTDIR: ""
   script:
+    - apk add --no-cache openbao
+    - !reference [.secret_fetcher, script]  # <---  Pulls in script from .secret_fetcher
+    - unset VAULT_TOKEN
+    - echo "I have the GHCR_PAT! It is $(echo "{$GHCR_PAT}" | cut -c 1-3)xxx"
     - echo "Detected changes in build context. Rebuilding base image on Host..."
     # This 'docker build' actually runs on the HOST machine because of the socket mapping.
     # It updates the 'ruby:local-patched' tag in the host's storage.
-    - podman build --layers -t ruby:local-patched -f docker/Dockerfile .
+    - docker build -t ruby:local-patched -f docker/Dockerfile . 
+    - echo "Have built ruby image from Dockerfile" 
+    - docker tag ruby:local-patched $CONTAINER_REGISTRY/$GH_USER_NAME/ruby:remote-patched 
+    - "echo \"Authentifying to ${CONTAINER_REGISTRY}\"" 
+    - echo "$GHCR_PAT" | docker login $CONTAINER_REGISTRY -u $GH_USER_NAME --password-stdin 
+    - "echo \"Authentified via docker to ${CONTAINER_REGISTRY}\"" 
+    - "echo \"Pushing ruby:local-patched to ${CONTAINER_REGISTRY}\"" 
+    - docker push "$CONTAINER_REGISTRY"/"$GH_USER_NAME"/ruby:remote-patched
   rules:
     # CONDITION: Only run if these files change in the commit/MR
     - if: '$CI_COMMIT_BRANCH == "main"'
@@ -155,22 +182,18 @@ run_tests:
   script:
     - ruby -v
     - echo "Running tests in the custom container..."
+    # - bundle install
+    # - rspec
+  rules:
+  - if:
 ```
+## Automated pulling
 
-## How `podman push ...` works
+Our task now is to automate the task of pulling from the github container repository.  Having `ruby:local-patched` coming from the local cache poses a major architectural weakness in CI/CD because:
+**Standard GitLab Runners do not share cache between jobs**
+If **Job A** does `docker build -t ruby:local-patched .` and **Job B** uses `image: ruby:local-patched`, then **Job B** will usually fail because Job A and Job B usually run on different fresh containers (or even different servers), and the image A builds disappears after A finishes.
 
-To put things into perspective and to manually test,
-
-`podman login -u <github_user_or organization_name> -p <github_Personal_authentification_token> ghcr.io`
-
-will log podman in to ghcr.io; and 
-
-`podman push ruby:local-patched ghcr.io/<gh_user_name>/ruby:remote-patched`
-
-will push the image which our pipeline ought to have already built.
-
-## Automated pushing
-
-Our task now is to automate the task of pushing to the github container repository.
+* **The Fix:** Even for "local" logic, the standard pattern is to push to the registry using a unique temporary tag and then pull *that* image in the next job.  Passing images purely via "local cache" only works if you are using a Shell executor on a single persistent server without containers or images, but on the host, or you are using a strictly controlled Docker setup.
+* **The trick** is to **build once but tag twice** , by which I mean tag with the git commit SHA for safety (so you can always roll back to an exact version), and also tag with `remote-patched` for convenience.
 
 

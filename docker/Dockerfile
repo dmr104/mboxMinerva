@@ -4,4 +4,4 @@ RUN apt-get update \
     && apt-get -y upgrade \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* \
-    && echo "have made a change called mice"
+    && echo "have made a change called mongooses"
