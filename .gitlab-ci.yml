@@ -113,7 +113,7 @@ deploy_dev:
     TARGET_ENV: "staging"  # <--- The "Flag" is hardcoded here
     environment:
       name: staging
-      # url https://dev.example.com
+      # url: https://dev.example.com
     rules:
       - if: $CI_COMMIT_BRANCH == "main"
 
@@ -124,7 +124,7 @@ deploy_prod:
     TARGET_ENV: "production"  # <--- The "Flag" is hardcoded here
     environment:
       name: production
-      # url https://example.com
+      # url: https://example.com
     rules:
       - if: $CI_COMMIT_BRANCH == "main"
         when: manual  # <--- The safety gate
