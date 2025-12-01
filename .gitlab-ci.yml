@@ -12,6 +12,7 @@
 stages:
   - build_infra
   - app_test
+  - deploy
 
 variables:
   # Disable per-build isolation so that we can see the previous images on the host
