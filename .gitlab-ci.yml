@@ -98,7 +98,7 @@ run_tests:
     # - bundle install
     # - rspec
 
-.deploy-template:
+.deploy_template:
   image: ruby:"$TAG_IMMUTABLE"
   script:
     - echo "Deploying image ${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:${TAG_IMMUTABLE}"
