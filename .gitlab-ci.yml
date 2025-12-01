@@ -97,7 +97,7 @@ run_tests:
     - ruby -v
     - echo "Running tests in the custom container..."
     # - bundle install
-    # - rspec
+    # - rspec 
 
 .deploy_template:
   image: "${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:${TAG_IMMUTABLE}"
