@@ -8,12 +8,12 @@ FROM docker.io/library/ruby:3.4.7-slim
 #    - git: Missing from slim, needed for gemspecs and git-crypt
 #    - build-essential: Needed for compiling pg and simhash native extensions
 #    - libpq-dev: Needed for pg header files
-#    - git-crypt: C++ binary for unlocking secrets (NOT a gem)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     build-essential \
     libpq-dev \
     gnupg \
+    libyaml-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # 2. Prepare App Directory
