@@ -9,30 +9,30 @@ plaintext commits.
 ## Architecture
 
 ```
-┌─────────────────┐
-│ git-crypt init  │  One-time setup: generates symmetric key
-└────────┬────────┘
+┌────────────────────────────────────────────────────────────┐
+│ git-crypt init  │  One-time setup: generates symmetric key                                         
+└────────┬───────────────────────────────────────────────────┘
          │
          v
 ┌─────────────────────────────────────────────────────────────┐
-│ .gitattributes: vault/** filter=git-crypt diff=git-crypt   │
-│   → All vault/ files encrypted on `git add`                │
+│ .gitattributes: vault/** filter=git-crypt diff=git-crypt   
+│   → All vault/ files encrypted on `git add`                
 └────────┬────────────────────────────────────────────────────┘
          │
          v
-┌──────────────────────────────────────────────────────────────┐
-│ VaultGuard.ensure_unlocked! (lib/vault_guard.rb)            │
-│   → Enforces unlock before PIIScrubber / DSRHelpers I/O     │
-│   → Writes sentinel, checks for binary garbage              │
-│   → Raises if locked (prevents corruption)                  │
-└────────┬─────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│ VaultGuard.ensure_unlocked! (lib/vault_guard.rb)            
+│   → Enforces unlock before PIIScrubber / DSRHelpers I/O     
+│   → Writes sentinel, checks for binary garbage              
+│   → Raises if locked (prevents corruption)                  
+└────────┬────────────────────────────────────────────────────┘
          │
          v
-┌──────────────────────────────────────────────────────────────┐
-│ CI/CD: scripts/ci_unlock_vault.sh                           │
-│   → Decodes GIT_CRYPT_KEY_BASE64 secret                     │
-│   → Runs `git-crypt unlock` before tests                    │
-└──────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│ CI/CD: scripts/ci_unlock_vault.sh                           
+│   → Decodes GIT_CRYPT_KEY_BASE64 secret                     
+│   → Runs `git-crypt unlock` before tests                                                            │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ## Setup (First Time)

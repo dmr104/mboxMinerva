@@ -35,7 +35,7 @@ HOST_IP=$(hostname -I | awk '{print $1}')
 
     podman run -d \
       --name "$CONTAINER_NAME" \
-      --network systemd-gitlab-net \
+      --network systemd-gitlab_net \
       --publish 8080:80 --publish 4443:443 --publish 2222:22 \
       --env GITLAB_OMNIBUS_CONFIG="external_url 'http://$HOST_IP:8080'; nginx['listen_port'] = 80; gitlab_rails['gitlab_shell_ssh_port'] = 2222; puma['port'] = 8081" \
       --volume gitlab-config:/etc/gitlab \
@@ -65,9 +65,9 @@ else
     # Crucial: We mount the HOST's podman socket into the container as docker.sock
     podman run -d \
       --name "$RUNNER_NAME" \
-      --network systemd-gitlab-net \
+      --network systemd-gitlab_net \
       --volume gitlab-runner-config:/etc/gitlab-runner \
-      --volume $XDG_RUNTIME_DIR/podman/podman.sock:/var/run/docker.sock \
+      --volume "$XDG_RUNTIME_DIR"/podman/podman.sock:/var/run/docker.sock \
       --security-opt label=disable \
       "$RUNNER_IMAGE"
 fi

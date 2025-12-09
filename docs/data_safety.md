@@ -29,7 +29,7 @@ This document outlines how mboxMinerva handles personally identifiable informati
 - Hashes IP addresses to RFC1918 private ranges
 
 **Reversibility**:
-- Pseudonym map stored separately in `vault/pseudonym_map.json` (encrypted at rest)
+- Pseudonym map stored separately in `crypt/pseudonym_map.json` (encrypted at rest)
 - Original email addresses never enter training data
 
 **Command**:
@@ -37,7 +37,7 @@ This document outlines how mboxMinerva handles personally identifiable informati
 ruby lib/pii_scrubber.rb \
   --seed 42 \
   --deterministic \
-  --save-map vault/pseudonym_map.json \
+  --save-map crypt/pseudonym_map.json \
   emails/raw.json emails/scrubbed.json
 ```
 
@@ -80,7 +80,7 @@ grep -Eo '\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b' models/checkpoint
 
 ### Data Subject Requests (DSR)
 **Right to Access**:
-1. Search `vault/pseudonym_map.json` for user's email
+1. Search `crypt/pseudonym_map.json` for user's email
 2. Reverse-lookup pseudonymized ID
 3. Query manifest for affected splits
 
@@ -117,7 +117,7 @@ grep -Eo '\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b' models/checkpoint
 
 ### Never Commit
 - `.env` files (database credentials, API keys)
-- `vault/pseudonym_map.json`
+- `crypt/pseudonym_map.json`
 - Raw mbox files
 
 ### Use

@@ -1,102 +1,116 @@
-# frozen_string_literal: true
-
-require 'digest'
+# lib/pii_scrubber.rb
 require 'json'
+require 'digest'
 require 'fileutils'
-require_relative 'vault_guard'
+require 'open3'
 
-##
-# PIIScrubber: Deterministic pseudonymization with encrypted vault storage.
-#
-# Usage:
-#   scrubber = PIIScrubber.new(vault_dir: 'vault/', seed: 42)
-#   scrubbed = scrubber.scrub_email(raw_email_text)
-#   scrubber.save_vault  # Commit mappings to encrypted vault
-#
-# Enforces git-crypt encryption via VaultGuard before any vault I/O.
-class PIIScrubber
-  EMAIL_REGEX = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/
-  IP_REGEX = /\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b/
-  
-  attr_reader :vault_dir, :seed
+class PiiScrubber
+  attr_reader :vault, :vault_dir, :salt
 
-  def initialize(vault_dir: 'vault/', seed: 42)
+  # algorithm: "symmetric" (AES) or "asymmetric" (Pubkey)
+  # key_material: Passphrase (for symmetric) or Recipient Email (for asymmetric)
+  def initialize(vault_dir:, salt_seed:, algorithm: :symmetric, key_material: nil)
     @vault_dir = vault_dir
-    @seed = seed
-    @email_map = {}
-    @ip_map = {}
-    @rng = Random.new(seed)
+    @salt = Digest::SHA256.hexdigest(salt_seed)
+    @vault = {}
+    @algorithm = algorithm
+    @key_material = key_material # Passphrase or Recipient
+    
+    # Ensure vault dir exists
+    FileUtils.mkdir_p(@vault_dir)
 
-    # ENFORCE: git-crypt must be unlocked before loading/saving vault
-    VaultGuard.ensure_unlocked!(vault_dir: vault_dir)
-
-    load_vault
+    # Load existing vaults
+    load_vaults
   end
 
-  ##
-  # Scrubs email addresses and IPs with deterministic pseudonyms.
-  # Same input → same pseudonym (seeded hash).
-  def scrub_email(text)
-    text = text.dup
-    text.gsub!(EMAIL_REGEX) { |email| pseudonymize_email(email) }
-    text.gsub!(IP_REGEX) { |ip| pseudonymize_ip(ip) }
-    text
+  def scrub_email(email)
+    return nil if email.nil? || email.empty?
+    scrub(email, 'email')
   end
 
-  ##
-  # Reverse lookup: pseudonym → original (for DSR export).
-  # Returns nil if pseudonym not found.
-  def reverse_lookup_email(pseudo)
-    @email_map.key(pseudo)
-  end
-
-  def reverse_lookup_ip(pseudo)
-    @ip_map.key(pseudo)
-  end
-
-  ##
-  # Saves mappings to encrypted vault (git-crypt enforced).
-  # Call after scrubbing batch to persist new pseudonyms.
-  def save_vault
-    VaultGuard.ensure_unlocked!(vault_dir: vault_dir)
-    FileUtils.mkdir_p(vault_dir)
-
-    File.write(File.join(vault_dir, 'email_map.json'), JSON.pretty_generate(@email_map))
-    File.write(File.join(vault_dir, 'ip_map.json'), JSON.pretty_generate(@ip_map))
-    File.write(File.join(vault_dir, 'seed.txt'), @seed.to_s)
+  def save!
+    save_vaults
   end
 
   private
 
-  def load_vault
-    email_file = File.join(vault_dir, 'email_map.json')
-    ip_file = File.join(vault_dir, 'ip_map.json')
-    seed_file = File.join(vault_dir, 'seed.txt')
-
-    @email_map = File.exist?(email_file) ? JSON.parse(File.read(email_file)) : {}
-    @ip_map = File.exist?(ip_file) ? JSON.parse(File.read(ip_file)) : {}
-
-    if File.exist?(seed_file)
-      stored_seed = File.read(seed_file).to_i
-      if stored_seed != @seed
-        warn "[WARN] Vault seed mismatch: stored=#{stored_seed}, requested=#{@seed}. Using stored."
-        @seed = stored_seed
-        @rng = Random.new(@seed)
-      end
+  def scrub(original, type)
+    # 1. Deterministic Hash (HMAC-like)
+    hash = Digest::SHA256.hexdigest("#{@salt}:#{type}:#{original}")
+    
+    # 2. Check Vault
+    if @vault[hash]
+      return @vault[hash]
     end
+
+    # 3. Generate Pseudonym if new
+    # Taking first 12 chars of hash as ID
+    pseudo = "user_#{hash[0..11]}"
+    @vault[hash] = pseudo
+    
+    # We store the reverse mapping too if needed, but here we just need consistency.
+    # To support DSR (reverse lookup), we'd store { pseudo => original } in a separate locked file.
+    # For now, we just memoize in memory.
+    
+    pseudo
   end
 
-  def pseudonymize_email(email)
-    @email_map[email] ||= generate_pseudonym("email_#{email}")
+  # --- GPG Storage Logic ---
+
+  def vault_file
+    File.join(@vault_dir, "pii_vault.json.gpg")
   end
 
-  def pseudonymize_ip(ip)
-    @ip_map[ip] ||= generate_pseudonym("ip_#{ip}")
+  def load_vaults
+    return unless File.exist?(vault_file)
+
+    puts "[PiiScrubber] Loading encrypted vault: #{vault_file}"
+    
+    decrypted_json = gpg_decrypt(vault_file)
+    @vault = JSON.parse(decrypted_json)
+  rescue JSON::ParserError
+    raise "Vault corruption: Decrypted data is not valid JSON."
   end
 
-  def generate_pseudonym(input)
-    # Deterministic hash: seed + input → stable pseudonym
-    hash = Digest::SHA256.hexdigest("#{@seed}:#{input}")[0..15]
-    "REDACTED_#{hash}"
+  def save_vaults
+    puts "[PiiScrubber] Saving encrypted vault..."
+    json_data = JSON.dump(@vault)
+    gpg_encrypt(json_data, vault_file)
+  end
+
+  # Robust GPG Wrapper using FD 3 for Passphrase to avoid 'ps' leakage
+  def gpg_decrypt(file_path)
+    # CMD: gpg --decrypt --batch --yes --pinentry-mode loopback --passphrase-fd 3 <file>
+    cmd = %w[gpg --decrypt --batch --yes --pinentry-mode loopback --passphrase-fd 3]
+    cmd << file_path
+
+    out, status = Open3.capture2(*cmd, 3 => @key_material) # Pass passphrase on FD 3
+
+    unless status.success?
+      raise "GPG Decryption Failed! Check your passphrase/key. (Exit: #{status.exitstatus})"
+    end
+    out
+  end
+
+  def gpg_encrypt(plain_text, output_path)
+    if @algorithm == :asymmetric
+      # Public Key Mode: No passphrase needed to ENCRYPT, just Recipient
+      # CMD: gpg --encrypt --recipient <email> --batch --yes --output <file>
+      cmd = %W[gpg --encrypt --recipient #{@key_material} --batch --yes --output #{output_path}]
+      
+      # We pipe the JSON data into stdin
+      out, status = Open3.capture2(*cmd, stdin_data: plain_text)
+    else
+      # Symmetric Mode: Needs Passphrase
+      # CMD: gpg --symmetric --batch --yes --pinentry-mode loopback --passphrase-fd 3 --output <file>
+      cmd = %W[gpg --symmetric --batch --yes --pinentry-mode loopback --passphrase-fd 3 --output #{output_path}]
+      
+      # We pipe JSON to stdin (content) AND Passphrase to FD 3 (auth) simultaneously
+      out, status = Open3.capture2(*cmd, stdin_data: plain_text, 3 => @key_material)
+    end
+
+    unless status.success?
+      raise "GPG Encryption Failed! (Exit: #{status.exitstatus})"
+    end
   end
 end
