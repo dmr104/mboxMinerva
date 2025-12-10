@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libpq-dev \
     gnupg \
-    libyaml-dev \ 
+    libyaml-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # 2. Prepare App Directory
