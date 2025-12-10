@@ -71,7 +71,7 @@ rebuild_ruby_base:
     - echo "Detected changes in build context. Rebuilding base image on Host..."
     # This 'docker build' actually runs on the HOST machine because of the socket mapping.
     # It updates the 'ruby:local-patched' tag in the host's storage.
-    - docker build --pull -t ruby:local-patched -f docker/Dockerfile . 
+    - docker buildx build --load --pull -t ruby:local-patched -f docker/Dockerfile . 
     - echo "Have built ruby image from Dockerfile" 
     - docker tag ruby:local-patched "$CONTAINER_REGISTRY/$GH_USER_NAME"/ruby:"$TAG_IMMUTABLE" 
     - docker tag ruby:local-patched "$CONTAINER_REGISTRY/$GH_USER_NAME"/ruby:remote-patched
