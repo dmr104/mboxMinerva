@@ -101,9 +101,7 @@ rebuild_ruby_base:
     DOCKER_HOST: "tcp://docker:2376"
     DOCKER_TLS_VERIFY: "1"
     DOCKER_CERT_PATH: "/certs/client"
-    # Your private image reference
-    PRIVATE_IMAGE: "${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:remote-patched"
-
+    
 run_tests:
   # We are now faced with the catch-22 chicken-and-egg problem whereby the image which we wish to pull i this job requires an auth, but auth can only be read after the image is pulled.  
   # So, we will use docker-in-docker (DinD) with a docker-cli as the job image (public, no auth needed), and with docker-dind as a service.  I wish that that gitlab facilitated auth prior to and upon the image that is pulled, but they don't, and I don't want to use a CI variable because this would defy our methodology of storing the github_PAT in the token vault.
@@ -112,8 +110,12 @@ run_tests:
   - .dind_base 
   stage: app_test
   before_script:
+    # Step 1. Run the inherited secret_fetcher script to get GHCR_PAT
     - !reference [.secret_fetcher, script]  # <---  Pulls in script from .secret_fetcher
-    # Wait for DinD to be ready (important!)
+    # Step 2. Clear the vault token (good hygiene)
+    - unset VAULT_TOKEN
+    - echo "I have the GHCR_PAT! It is $(echo "{$GHCR_PAT}" | cut -c 1-3)xxx"
+    # Step 3. Wait for DinD to be ready (important!)
     - |
       echo "Waiting for Docker daemon..."
       for i in $(seq 1 30); do
@@ -121,13 +123,11 @@ run_tests:
         echo "Attempt $i: Docker not ready yet..."
         sleep 1
       done
-    # Authenticate to GHCR using the Vault-fetched PAT
+    # Step 4. Authenticate to GHCR using the Vault-fetched PAT
     # GHCR_PAT comes from .secret_fetcher
     - echo "$GHCR_PAT" | docker login $CONTAINER_REGISTRY -u $GH_USER_NAME --password-stdin
     # Pull your private image
-    - docker pull "$PRIVATE_IMAGE"
-  image: 
-     name: "${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:remote-patched"
+    - docker pull "${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:remote-patched"
   script:
     # (run multiple commands in same container)
     - |
