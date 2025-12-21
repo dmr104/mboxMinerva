@@ -58,7 +58,7 @@ rebuild_ruby_base:
     - unset VAULT_TOKEN
     - echo "I have the GHCR_PAT! It is $(echo "{$GHCR_PAT}" | cut -c 1-3)xxx"
 
-    # Step 3. Build and push
+    # Step 3. Build and tag
     - echo "Detected changes in build context. Rebuilding base image on Host..."
     # This 'docker build' actually runs on the HOST machine because of the socket mapping.
     # It updates the 'ruby:local-patched' tag in the host's storage.
@@ -86,16 +86,55 @@ rebuild_ruby_base:
 
 # JOB 2: The Consumer
 # Usage: Runs your actual tests using the image from Job 1
+# Base DinD configuration
+.dind_base:
+  image: docker:24.0.5-cli
+  services:
+    - name: docker:24.0.5-dind
+      alias: docker
+      # Optional: pass extra args to dockerd
+      # command: ["--tls=false"]  # Only if you're disabling TLS (not recommended for prod)
+  variables:
+    # TLS certs shared between job container and dind service
+    DOCKER_TLS_CERTDIR: "/certs"
+    # Tell docker CLI where to find the daemon
+    DOCKER_HOST: "tcp://docker:2376"
+    DOCKER_TLS_VERIFY: "1"
+    DOCKER_CERT_PATH: "/certs/client"
+    # Your private image reference
+    PRIVATE_IMAGE: "${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:remote-patched"
+
 run_tests:
-  extends: .secret_fetcher  # <--- Pulls in variables from .secret_fetcher
+  # We are now faced with the catch-22 chicken-and-egg problem whereby the image which we wish to pull i this job requires an auth, but auth can only be read after the image is pulled.  
+  # So, we will use docker-in-docker (DinD) with a docker-cli as the job image (public, no auth needed), and with docker-dind as a service.  I wish that that gitlab facilitated auth prior to and upon the image that is pulled, but they don't, and I don't want to use a CI variable because this would defy our methodology of storing the github_PAT in the token vault.
+  extends: 
+  - .secret_fetcher  # <--- Pulls in variables from .secret_fetcher
+  - .dind_base 
   stage: app_test
+  before_script:
+    - !reference [.secret_fetcher, script]  # <---  Pulls in script from .secret_fetcher
+    # Wait for DinD to be ready (important!)
+    - |
+      echo "Waiting for Docker daemon..."
+      for i in $(seq 1 30); do
+        docker info >/dev/null 2>&1 && break
+        echo "Attempt $i: Docker not ready yet..."
+        sleep 1
+      done
+    # Authenticate to GHCR using the Vault-fetched PAT
+    # GHCR_PAT comes from .secret_fetcher
+    - echo "$GHCR_PAT" | docker login $CONTAINER_REGISTRY -u $GH_USER_NAME --password-stdin
+    # Pull your private image
+    - docker pull "$PRIVATE_IMAGE"
   image: 
      name: "${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:remote-patched"
   script:
-    - ruby -v
-    - echo "Running tests in the custom container..."
-    # - bundle install
-    # - rspec 
+    # (run multiple commands in same container)
+    - |
+      docker run --rm -v "$CI_PROJECT_DIR:/app" -w /app "$PRIVATE_IMAGE" sh -c "
+        ruby -v
+        echo "Running tests in the custom container..."
+      "
 
 .deploy_template:
   variables:
