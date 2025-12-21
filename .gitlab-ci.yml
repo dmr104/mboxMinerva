@@ -87,6 +87,7 @@ rebuild_ruby_base:
 # JOB 2: The Consumer
 # Usage: Runs your actual tests using the image from Job 1
 run_tests:
+  extends: .secret_fetcher  # <--- Pulls in variables from .secret_fetcher
   stage: app_test
   image: 
      name: "${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:remote-patched"
