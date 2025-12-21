@@ -95,72 +95,45 @@ will push the image which our pipeline ought to have already built.
 ## Automated pushing
 
 Our task now is to automate the task of pushing to the github container repository.
-### Our **.gitlab-ci.yml** file thus far.
+
+### Part of our **.gitlab-ci.yml** file thus far now will look like.
 ```yaml
-
-
-stages:
-  - build_infra
-  - app_test
-
-variables:
-  # Disable per-build isolation so that we can see the previous images on the host
-  FF_NETWORK_PER_BUILD: "false"
-  VAULT_ADDR: "http://192.168.1.168:8200"
-  GH_USER_NAME: "dmr104"
-  CONTAINER_REGISTRY: "ghcr.io"
-
-# secret_fetcher (the gitlab-runner will spin up separate job containers on the host using a podman executor, so we NEED an image for those job containers "alpine:latest")
-.secret_fetcher:
-  image: openbao/openbao:latest # Gives us the `bao` command
-  variables:
-    PATH_OF_SECRET: "github-creds"   # This must match the name of our secret with OpenBao's secret engine.
-    VAULT_ROLE: "gitlab-dev-runner-role"
-  id_tokens:
-    # This generates the JWT. 
-    BAO_VAULT_ID:
-      aud: "my-super-secure-app-id"  # The 'aud' MUST match OpenBao's 'bound-audiences'
-
-  script: 
-    - echo "Authentifying to OpenBao..."
-
-    # 1. Login to OpenBao
-    # We send the variable $BAO_VAULT_ID to OpenBao via **`id_tokens`** which is a signed JWT embedding with aud (audience).
-    - echo "Vault role is $VAULT_ROLE"
-    - export VAULT_TOKEN=$(bao write -field=token auth/jwt/login role=$VAULT_ROLE jwt=$BAO_VAULT_ID)
-    - echo "I have the VAULT_TOKEN! It is $(echo "${VAULT_TOKEN}" | cut -c 1-3)xxx"
-
-    # 2. Fetch the GHCR_PAT secret.
-    - echo "Fetching secrets from ${PATH_OF_SECRET}"
-    - export GHCR_PAT=$(bao kv get -mount=secret -field=pat $PATH_OF_SECRET)
-    - echo "I have the secret! It is $(echo "${GHCR_PAT}" | cut -c 1-3)xxx"
-
 # JOB 1: The Builder
 # Usage: Builds the image ONLY if you touch files in 'docker/'
 rebuild_ruby_base:
   extends: .secret_fetcher  # <--- Pulls in variables from .secret_fetcher
   stage: build_infra
-  # Use generic docker client; it talks to your mapped /var/run/docker.sock (podman)
-  image: docker:cli
+    # Inherits the `openbao/openbao:latest` image from .secret_fetcher (so that `bao` auth tool is native). 
   variables:
     # Disable TLS since we are talking to a local Unix socket
     DOCKER_TLS_CERTDIR: ""
+  before_script: 
+    # Install the docker client utility on top of openbao (`apk add --no-cache docker-cli`), so that the image will be able to talk to our /var/run/docker.sock (podman) in the GitLab Runner which is mapped to $XDG_RUNTIME_DIR"/podman/podman.sock in the Host (see INITIAL_SETUP/Gitlab.sh)
+    - apk add --no-cache docker-cli docker-cli-buildx
   script:
-    - apk add --no-cache openbao
+    # Step 1: Run the inherited secret_fetcher script to get GHCR_PAT
     - !reference [.secret_fetcher, script]  # <---  Pulls in script from .secret_fetcher
+
+    # Step 2. Clear the vault token (good hygiene)
     - unset VAULT_TOKEN
     - echo "I have the GHCR_PAT! It is $(echo "{$GHCR_PAT}" | cut -c 1-3)xxx"
+
+    # Step 3. Build and push
     - echo "Detected changes in build context. Rebuilding base image on Host..."
     # This 'docker build' actually runs on the HOST machine because of the socket mapping.
     # It updates the 'ruby:local-patched' tag in the host's storage.
-    - docker build -t ruby:local-patched -f docker/Dockerfile . 
+    - docker buildx build --load --pull -t ruby:local-patched -f docker/Dockerfile . 
     - echo "Have built ruby image from Dockerfile" 
-    - docker tag ruby:local-patched $CONTAINER_REGISTRY/$GH_USER_NAME/ruby:remote-patched 
+    - docker tag ruby:local-patched "$CONTAINER_REGISTRY/$GH_USER_NAME"/ruby:"$TAG_IMMUTABLE" 
+    - docker tag ruby:local-patched "$CONTAINER_REGISTRY/$GH_USER_NAME"/ruby:remote-patched
+
+    # Step 4. Auth and push to GHCR
     - "echo \"Authentifying to ${CONTAINER_REGISTRY}\"" 
     - echo "$GHCR_PAT" | docker login $CONTAINER_REGISTRY -u $GH_USER_NAME --password-stdin 
     - "echo \"Authentified via docker to ${CONTAINER_REGISTRY}\"" 
     - "echo \"Pushing ruby:local-patched to ${CONTAINER_REGISTRY}\"" 
-    - docker push "$CONTAINER_REGISTRY"/"$GH_USER_NAME"/ruby:remote-patched
+    - docker push "$CONTAINER_REGISTRY"/"$GH_USER_NAME"/ruby:"$TAG_IMMUTABLE" 
+    - docker push "$CONTAINER_REGISTRY"/"$GH_USER_NAME"/ruby:remote-patched 
   rules:
     # CONDITION: Only run if these files change in the commit/MR
     - if: '$CI_COMMIT_BRANCH == "main"'
@@ -169,23 +142,7 @@ rebuild_ruby_base:
         - docker/**/*
     # FALLBACK: Allow manual triggering in the UI if you ever need to force a rebuild (e.g. clean host)
       when: manual                # <--- You must click "Play" in the UI.
-      allow_failure: false        # The pipeline blocks here until you tell it to proceed.
-
-# JOB 2: The Consumer
-# Usage: Runs your actual tests using the image from Job 1
-run_tests:
-  stage: app_test
-  # Because of pull_policy = ["if-not-present"], the Runner looks for this tag
-  # on the host first. If Job 1 ran, it sees the new one. If Job 1 skipped, it sees the old one.
-  image: 
-     name: ruby:local-patched
-  script:
-    - ruby -v
-    - echo "Running tests in the custom container..."
-    # - bundle install
-    # - rspec
-  rules:
-  - if:
+    #  allow_failure: false        # The pipeline blocks here until you tell it to proceed.
 ```
 ## Automated pulling
 
@@ -196,8 +153,9 @@ If **Job A** does `docker build -t ruby:local-patched .` and **Job B** uses `ima
 * **The Fix:** Even for "local" logic, the standard pattern is to push to the registry using a unique temporary tag and then pull *that* image in the next job.  Passing images purely via "local cache" only works if you are using a Shell executor on a single persistent server without containers or images, but on the host, or you are using a strictly controlled Docker setup.
 * **The trick** is to **build once but tag twice** , by which I mean tag with the git commit SHA for safety (so you can always roll back to an exact version), and also tag with `remote-patched` for convenience.
 
-### Our **gitlab-ci.yml** now looks like
+### Our **gitlab-ci.yml** *now* will look like
 ```yaml
+# .gitlab-ci.yml — mboxMinerva CI/CD Pipeline
 
 stages:
   - build_infra
@@ -212,7 +170,7 @@ variables:
   CONTAINER_REGISTRY: "ghcr.io"
   TAG_IMMUTABLE: $CI_COMMIT_SHORT_SHA
 
-# secret_fetcher (the gitlab-runner will spin up separate job containers on the host using a podman executor, so we NEED an image for those job containers "alpine:latest")
+# secret_fetcher (the gitlab-runner will spin up separate job containers on the host using a podman executor, so we NEED an image for those job containers "alpine:latest" which by default will come from docker.io registry)
 .secret_fetcher:
   image: openbao/openbao:latest # Gives us the `bao` command
   variables:
@@ -242,23 +200,31 @@ variables:
 rebuild_ruby_base:
   extends: .secret_fetcher  # <--- Pulls in variables from .secret_fetcher
   stage: build_infra
-  # Use generic docker client; it talks to your mapped /var/run/docker.sock (podman)
-  image: docker:cli
+    # Inherits the `openbao/openbao:latest` image from .secret_fetcher (so that `bao` auth tool is native). 
   variables:
     # Disable TLS since we are talking to a local Unix socket
     DOCKER_TLS_CERTDIR: ""
+  before_script: 
+    # Install the docker client utility on top of openbao (`apk add --no-cache docker-cli`), so that the image will be able to talk to our /var/run/docker.sock (podman) in the GitLab Runner which is mapped to $XDG_RUNTIME_DIR"/podman/podman.sock in the Host (see INITIAL_SETUP/Gitlab.sh)
+    - apk add --no-cache docker-cli docker-cli-buildx
   script:
-    - apk add --no-cache openbao
+    # Step 1: Run the inherited secret_fetcher script to get GHCR_PAT
     - !reference [.secret_fetcher, script]  # <---  Pulls in script from .secret_fetcher
+
+    # Step 2. Clear the vault token (good hygiene)
     - unset VAULT_TOKEN
     - echo "I have the GHCR_PAT! It is $(echo "{$GHCR_PAT}" | cut -c 1-3)xxx"
+
+    # Step 3. Build and push
     - echo "Detected changes in build context. Rebuilding base image on Host..."
     # This 'docker build' actually runs on the HOST machine because of the socket mapping.
     # It updates the 'ruby:local-patched' tag in the host's storage.
-    - docker build --pull -t ruby:local-patched -f docker/Dockerfile . 
+    - docker buildx build --load --pull -t ruby:local-patched -f docker/Dockerfile . 
     - echo "Have built ruby image from Dockerfile" 
     - docker tag ruby:local-patched "$CONTAINER_REGISTRY/$GH_USER_NAME"/ruby:"$TAG_IMMUTABLE" 
-    - docker tag ruby:local-patched "$CONTAINER_REGISTRY/$GH_USER_NAME"/ruby:remote-patched 
+    - docker tag ruby:local-patched "$CONTAINER_REGISTRY/$GH_USER_NAME"/ruby:remote-patched
+
+    # Step 4. Auth and push to GHCR
     - "echo \"Authentifying to ${CONTAINER_REGISTRY}\"" 
     - echo "$GHCR_PAT" | docker login $CONTAINER_REGISTRY -u $GH_USER_NAME --password-stdin 
     - "echo \"Authentified via docker to ${CONTAINER_REGISTRY}\"" 
@@ -279,20 +245,20 @@ rebuild_ruby_base:
 # Usage: Runs your actual tests using the image from Job 1
 run_tests:
   stage: app_test
-  # Because of pull_policy = ["if-not-present"], the Runner looks for this tag
-  # on the host first. If Job 1 ran, it sees the new one. If Job 1 skipped, it sees the old one.
   image: 
-     name: "${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:${TAG_IMMUTABLE}"
+     name: "${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:remote-patched"
   script:
     - ruby -v
     - echo "Running tests in the custom container..."
     # - bundle install
-    # - rspec
+    # - rspec 
 
 .deploy_template:
-  image: "${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:${TAG_IMMUTABLE}"
+  variables:
+    USE_TAG: "912ab15f"
+  image: "${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:${USE_TAG}"
   script:
-    - echo "Deploying image ${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:${TAG_IMMUTABLE}"
+    - echo "Deploying image ${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:${USE_TAG}"
     - "echo \"Targeting environment: ${TARGET_ENV}\""
     # - ./deploy_script.sh --env $TARGET_ENV --tag $CI_COMMIT_SHORT_SHA
 

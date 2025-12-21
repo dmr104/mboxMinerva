@@ -8,7 +8,7 @@ An alternative approach can be to just use a configuration table in a database, 
 
 Note that the scope of what I describe here is to set up the token vault within a development environment -- which is NOT production ready.  In particular, one system administrator having access to the root token might put too much trust into one person's hands.  An alternative approach is that an unseal key which generates this root token may be split into multiple shards whereby say three responsible individuals each possess one shard, all of which are needed to generate the unseal key to generate the root token to unseal/decrypt what data is stored and is necessary for OpenBao to be queried.
 
-## What I did
+## Development mode (not very useful for CI)
 I installed podman via the command line package manager.
 Then I did `podman pull docker.io/openbao/openbao-ubi` 
 
@@ -40,18 +40,18 @@ Then I did `podman pull docker.io/openbao/openbao-ubi`
     systemctl --user enable --now openbao
     ```
 
-Note that if you are running a non-development server (i.e. without the -dev flag) then you may wish to explicitly disable the possibility that the OS swaps OpenBao's memory to the hard drive, as this might contain the unencrypted master keys, which for a docker container (a docker container runs as root) is done using the `--cap-add=IPC_LOCK` flag.  
+Note that if you are running a non-development server (i.e. without the -dev flag) then you may wish to explicitly disable the possibility that the OS swaps OpenBao's memory to the hard drive, as this might contain the unencrypted master keys: which for a docker container (a docker container runs as root) is done using the `--cap-add=IPC_LOCK` flag.  
 
-However, Podman is running as a regular user, so instead of trying to greedily lock memory we tell OpenBao "It's okay, don't try to lock memory" by configuring `Environment='BAO_LOCAL_CONFIG={"disable_mlock": true}'`, which uses the system call named `mlock`.  The rationale behind this approach is that if an attacker has physical access to your CI runner's hard drive such that he/she/they can read swap files, then you have a much bigger security problem than this.  Also the real problem is that as Podman, by default, is running as a regular user, it doesn't have permission to lock memory, and will crash if OpenBao attempts to do it with a "Permission Denied". Obviously this is undesirable and we seek to avoid it. In -dev mode the possibility of locking memory is disabled automatically.
+However, Podman is running as a regular user, so instead of trying to greedily lock memory we can tell OpenBao "It's okay, don't try to lock memory" by configuring `Environment='BAO_LOCAL_CONFIG={"disable_mlock": true}'`, which uses the system call named `mlock`.  The rationale behind this approach is that if an attacker has physical access to your CI runner's hard drive such that he/she/they can read swap files, then you have a much bigger security problem than this.  Also the real problem is that as Podman, by default, is running as a regular user, it doesn't have permission to lock memory, and will crash if OpenBao attempts to do it with a "Permission Denied". Obviously this is undesirable and we seek to avoid it. In -dev mode the possibility of locking memory is disabled automatically.
 
 The bao-data volume (on the host) might be stored, by default, at `~/.local/share/containers/storage/volumes/bao-data`
 
 
-4.  **Obtain your root key and login to OpenBai via the (local) web interface:**
+4.  **Obtain your root key and login to OpenBao via the (local) web interface:**
     ```bash
     systemctl --user status openbao.service
     ```
-    then input the root token into http://http://127.0.0.1:8200
+    then input the root token into http://127.0.0.1:8200
 
 
 ## Production mode
@@ -102,12 +102,18 @@ DNSname=gitlab_net
 ```
 
 
-#### Usage details.
-The command `podman unshare chown -R 100:100 %h/.config/openbao/data` within the openbao.constainer is because within the openbao container, the entrypoint sees that it is running as root and it immediately drops the privileges of the process to the UID 100.  In the host, the podman may run with the host UID of 1000, and we need these to match; so this command takes all the directories recursively on the host and changes their ownership to host sub-UID 100099 which maps to UID 100 within the container.
+### Usage details
+The command `podman unshare chown -R 100:100 %h/.config/openbao/data` within the openbao.container is because within the openbao container, the entrypoint sees that it is running as root and it immediately drops the privileges of the process to the UID 100.  In the host, the podman may run with the host UID of 1000, and we need these to match; so this command takes all the directories recursively on the host and changes their ownership to host sub-UID 100099 which maps to UID 100 within the container.  To view this run `ls -la ~/.config/openbao/data`.
 
 If you mess up, and lose your keys, and need to `rm -rf ~/.config/openbao/data/` then simply do `podman unshare chown -R 0:0 data/` to restore the ownership on the host to UID 100.
 
-Obviously, for a production environment we would not use the script file as `./Gitlab.sh` to start the gitlab and gitlab-runner containers.  In a production environment it is possible that you *might* wish to create podman quadlets to ensure that these services are always automatically enabled and running, but I will not create these here as within my environment (dev) I only wish to have the gitlab container running when I am working on this project.  Within a production environment I suppose that rundancy and backup servers have to be considered, and also policies regarding who has access to what secrets, how these are enforced, and what happens if by an accident, or by somebody leaving the company, a secret goes with them.  This secret should not become lost, it should be retrievable by another member of the team, and revokable by admin.  Whatever your company infrastructure design, I hope that these INITIAL_SETUP files have given you an opportunity to see what I have done within my dev environment to set things up between gitlab and the openbao, and that this will allow you and your team to quickly prototype this project for the management team to consider.
+Obviously, for a production environment we would not use the script file as `./Gitlab.sh` to start the gitlab and gitlab-runner containers.  In a production environment it is possible that you *might* wish to create podman quadlets to ensure that these services are always automatically enabled and running, but I will not create these here as within my environment I only wish to have the gitlab container running when I am working on this project.  Within a production environment I suppose that rundancy and backup servers have to be considered, and also policies regarding who has access to what secrets, how these are enforced, and what happens if by an accident, or by somebody leaving the company, a secret goes with them.  This secret should not become lost, it should be retrievable by another member of the team, and revokable by admin.  Whatever your company infrastructure design, I hope that these INITIAL_SETUP files have given you an opportunity to see what I have done within my dev environment to set things up between gitlab and the openbao, and that this will allow you and your team to quickly prototype this project for the management team to consider.
 
-#### Problem resolution
+### Problem resolution
 A useful debugging command to run is `/usr/libexec/podman/quadlet -dryrun --user`
+
+## Creating unseal and root keys.
+A fresh bao starts **unitialized** (no auth exists yet); so we may run `podman exec -it systemd-openbao bao operator init -format=json > openbao_init_keys.json`, which requires NO root token or unseal tokens, but creates the root token and the unseal keys.  Keep this file `openbao_init_keys.json` very secure and safe, because if you lose it you will be crypographically locked out of the token vault.  THEN you unseal with the unseal keys.  THEN you auth with the root token.  
+
+### If you ever wish to create a new root token
+If you ever want a fresh root token you can run `podman exec -it systemd-openbao bao operator generate-root -init` to get a OTP (one-time password); then run `podman exec -it generate-root` repeatedly with each unseal key until the threshold is met.  Then decode the encoded token by using that OTP.  This pathway is deliberately awkward to prevent casual root token minting.   

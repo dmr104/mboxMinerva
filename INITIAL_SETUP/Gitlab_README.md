@@ -37,12 +37,12 @@ podman exec -it gitlab-runner gitlab-runner register
 The command will ask you questions. Your answers matter because of **Container Networking**:
 
 1.  **Enter the GitLab instance URL:**
-    *   *Wrong Answer:* `http://localhost` (This refers to the *runner container itself*, not your PC).
-    *   *Correct Answer:* `http://gitlab:8080` (If you can use the **container name** of your GitLab server; Podman resolves this name over the shared network presumably if aardvark-dns is installed: which, as it was not available on deepin apt package manager on my system, I resorted to doing `http://192.168.1.168:8080` where this was the internal ip of my network card).
+    *   *Wrong Answer:* `http://localhost:8080` (This refers to the runner ***container*** itself, not an interface which is accessible within that container).
+    *   *Correct Answer:* `http://gitlab:8080` (If you *can* use the **container name** of your GitLab server; Podman resolves this name over the shared network presumably if aardvark-dns is installed: which, as it was not available on deepin apt package manager on my system, I resorted to doing `http://192.168.1.168:8080` where this was the internal ip of my network card).
 2.  **Enter the registration token:**
     *   Paste the `glrt-...` token you copied earlier.
 3.  **Enter a description:** `podman-runner` (aesthetic only).
-4.  **Enter tags:** `docker` (this is optional - your job tags configured under gitlab-runner must match the job tags you put under `tags:` in each .gitlab-ci.yml job, or that job will never be picked up by that runner). You might choose tags: [podman, rootless].  Take your pick. 
+4.  **Enter tags:** `docker` (this is optional - your job tags configured under gitlab-runner must match the job tags you put under `tags:` in each .gitlab-ci.yml job, or that job will never be picked up by that runner). You might choose tags: [podman, rootless].  Take your pick.  I believe I left it blank for the purposes of this tutorial.
 5.  **Enter optional maintenance note:** (Skip).
 6.  **Enter an executor:**
     *   **`docker`** (This is the one you want. It means "When I get a job, create a *new* throwaway container to run it").
@@ -50,21 +50,37 @@ The command will ask you questions. Your answers matter because of **Container N
     *   `ruby:3.3` (or `alpine:latest`). This is the fallback image if your `.gitlab-ci.yml` doesn't specify one.
 
 ### Why is this manual?
-Because the Runner needs to generate cryptographic keys to talk to the Server securelessly. You only do this **once**. After this, the `config.toml` is saved in your `gitlab-runner-config` volume, and the Runner will auto-connect on every restart.
+Because the Runner needs to generate cryptographic keys to talk to the gitlab server securelessly. You only do this **once**. After this, the `config.toml` is saved in your `gitlab-runner-config` volume, and the Runner will auto-connect on every restart.
 
 ## Caution.
 Be careful not to register your Runner more than once, as each time you do will create an addition [[runners]] section within your `config.toml` file, each superceding the previous.
 
 ## Useful commands
-* `podman exec -it gitlab-runner gitlab-runner list` will display (any) tags set up for gitlab-runner plus other info
+* `podman exec -it gitlab-runner gitlab-runner list` will display (any) tags set up for gitlab-runner plus other info.  Of course, for this command to work you will need to have gitlab server running (which we are doing here via the `Gitlab.sh` script).
 
 ## How to tell self-hosted gitlab about the existence of a local git repo
 I already have an up-to-date checked-out git clone on my local machine from github.  What I would like to do is to set another remote to push to the local self-hosted GitLab.  How do I achieve this?
 
-#### What is oauth2?  
+### What is oauth2?  
 
 In this context, `oauth2` is a type of username that GitLab expects when you authentify over HTTP with a personal access token, which is a long string which is to be used as the password. So `http://oauth2:YOUR_TOKEN@host/namespace/repo.git` tells Git to log in.  
 
-You can create the token on GitLab via **User Settings** -> **Access Tokens** -> **scopes: `write_repository`. The API box is to grant full access to GitLab's REST API, which is not needed for just `git push`.  I selected visbility level as `Private`.
+You can create the token on GitLab via **User Settings** -> **Access Tokens** -> **scopes: `write_repository`**. The API box is to grant full access to GitLab's REST API, which is not needed for just `git push`.  I selected visbility level as `Private`.
 
 As I was logged in to github as root I did `git remote add http://oauth2:MY_PERSONAL_ACCESS_TOKEN@localhost:8080/root/minerva.git`
+
+## Keeping a copy of your gitlab root password
+There is a default user name to access the omnibus gitlab community edition and this username is `root`.
+
+The password is inside of the file as `/etc/gitlab/initial_root_password` within the container, but this file becomes automatically deleted after 24 hours!  Keep a copy safe and sound immediately.
+
+If you forgot to do this, you can reset it as follows:
+
+- First exec into the container via `podman exec -it gitlab gitlab-rails console`, and wait for a minute until you see the intereactive ruby shell
+- type the following: `u=User.where(id:1).first`
+- type `u.password='NewPass123'`
+- type `u.password_confirmation='NewPass123'`
+- type `u.save!`
+- type `exit`
+
+Remember to keep a copy of this password safe!

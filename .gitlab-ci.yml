@@ -1,13 +1,4 @@
-# .gitlab-ci.yml — mboxMinerva CI/CD Pipeline with git-crypt enforcement
-# ============================================================================
-# Stages: lint → test → security → build → release
-# New: git-crypt unlock before any job that touches vault/ or PII modules
-# Required CI/CD Variables (Settings → CI/CD → Variables):
-#   - GPG_PRIVATE_KEY: base64-encoded GPG private key (git-crypt unlock)
-#   - GPG_PASSPHRASE: passphrase for the GPG key (if protected)
-# ============================================================================
-
-
+# .gitlab-ci.yml — mboxMinerva CI/CD Pipeline
 
 stages:
   - build_infra
@@ -97,8 +88,6 @@ rebuild_ruby_base:
 # Usage: Runs your actual tests using the image from Job 1
 run_tests:
   stage: app_test
-  # Because of pull_policy = ["if-not-present"], the Runner looks for this tag
-  # on the host first. If Job 1 ran, it sees the new one. If Job 1 skipped, it sees the old one.
   image: 
      name: "${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:remote-patched"
   script:
@@ -109,7 +98,7 @@ run_tests:
 
 .deploy_template:
   variables:
-    USE_TAG: "da800744"
+    USE_TAG: "912ab15f"
   image: "${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:${USE_TAG}"
   script:
     - echo "Deploying image ${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:${USE_TAG}"
