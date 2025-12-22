@@ -92,6 +92,7 @@ rebuild_ruby_base:
   services:
     - name: docker:24.0.5-dind
       alias: docker
+      privileged: true
       # Optional: pass extra args to dockerd
       # command: ["--tls=false"]  # Only if you're disabling TLS (not recommended for prod)
   variables:
