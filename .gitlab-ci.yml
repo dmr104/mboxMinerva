@@ -93,10 +93,9 @@ rebuild_ruby_base:
   variables:
     # Tell docker CLI where to find the daemon
     DOCKER_HOST: "unix:///var/run/docker.sock"
-    FF_NETWORK_PER_BUILD: "1"
 
 get_ruby_image_and_test:
-  tags: ["dind"]
+  tags: ["aux1"]
   variables:
     PRIVATE_GH_IMAGE: ${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:remote-patched
   extends: 
