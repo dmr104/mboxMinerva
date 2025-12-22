@@ -109,28 +109,19 @@ run_tests:
   tags: ["dind"]
   extends: 
   - .dind_base 
+  - .secret_fetcher
   stage: app_test
   before_script:
-    # Step 1. Install bao dependencies
+    # Install bao dependencies
     - wget -qO- https://github.com/openbao/openbao/releases/download/v2.4.4/bao_2.4.4_Linux_x86_64.tar.gz | tar xz -C /usr/local/bin
     
-    - echo "Authentifying to OpenBao..."
-    # Step 2. Login to OpenBao
-    # We send the variable $BAO_VAULT_ID to OpenBao via **`id_tokens`** which is a signed JWT embedding with aud (audience).
-    - echo "Vault role is $VAULT_ROLE"
-    - export VAULT_TOKEN=$(bao write -field=token auth/jwt/login role=$VAULT_ROLE jwt=$BAO_VAULT_ID)
-    - echo "I have the VAULT_TOKEN! It is $(echo "${VAULT_TOKEN}" | cut -c 1-3)xxx"
+    - !reference [.secret_fetcher, script]  # <---  Pulls in script from .secret_fetcher
 
-    # Step 3. Fetch the GHCR_PAT secret.
-    - echo "Fetching secrets from ${PATH_OF_SECRET}"
-    - export GHCR_PAT=$(bao kv get -mount=secret -field=pat $PATH_OF_SECRET)
-    - echo "I have the secret! It is $(echo "${GHCR_PAT}" | cut -c 1-3)xxx"
-
-    # Step 4. Clear the vault token (good hygiene)
+    # Clear the vault token (good hygiene)
     - unset VAULT_TOKEN
     - echo "I have the GHCR_PAT! It is $(echo "{$GHCR_PAT}" | cut -c 1-3)xxx"
 
-    # Step 5. Wait for DinD to be ready (important!)
+    # Wait for DinD to be ready (important!)
     - |
       echo "Waiting for Docker daemon..."
       for i in $(seq 1 30); do
@@ -138,11 +129,12 @@ run_tests:
         echo "Attempt $i: Docker not ready yet..."
         sleep 1
       done
-    # Step 6. Authenticate to GHCR using the Vault-fetched PAT
+    # Authenticate to GHCR using the Vault-fetched PAT
     # GHCR_PAT comes from .secret_fetcher
+    - "echo \"Authentifying to ${CONTAINER_REGISTRY}\""     
     - echo "$GHCR_PAT" | docker login $CONTAINER_REGISTRY -u $GH_USER_NAME --password-stdin
 
-    # Step 7. Pull your private image
+    # Pull your private image
     - docker pull "${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:remote-patched"
   script:
     # (run multiple commands in same container)
