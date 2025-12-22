@@ -87,16 +87,12 @@ rebuild_ruby_base:
 # JOB 2: The Consumer
 # Usage: Runs your actual tests using the image from Job 1
 # Base DinD configuration
-.dind_base:
+.docker_cli_base:
   image: docker:24.0.5-cli
   variables:
-    # TLS certs shared between job container and dind service
-    DOCKER_TLS_CERTDIR: "/certs"
     # Tell docker CLI where to find the daemon
     DOCKER_HOST: "unix:///var/run/docker.sock"
-    DOCKER_TLS_VERIFY: "1"
     FF_NETWORK_PER_BUILD: "1"
-    DOCKER_CERT_PATH: "/certs/client"
 
 run_tests:
   tags: ["dind"]
@@ -104,7 +100,7 @@ run_tests:
     PRIVATE_GH_IMAGE: "${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:remote-patched"
   extends: 
   - .secret_fetcher
-  - .dind_base 
+  - .docker_cli_base 
   stage: app_test
   before_script:
     # Install bao dependencies
