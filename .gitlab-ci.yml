@@ -89,24 +89,19 @@ rebuild_ruby_base:
 # Base DinD configuration
 .dind_base:
   image: docker:24.0.5-cli
-  services:
-    - name: docker:24.0.5-dind
-      alias: docker
-      # Optional: pass extra args to dockerd
-      # command: ["--tls=false"]  # Only if you're disabling TLS (not recommended for prod)
   variables:
     # TLS certs shared between job container and dind service
     DOCKER_TLS_CERTDIR: "/certs"
     # Tell docker CLI where to find the daemon
-    DOCKER_HOST: "tcp://docker:2376"
+    DOCKER_HOST: "unix:///var/run/docker.sock"
     DOCKER_TLS_VERIFY: "1"
     FF_NETWORK_PER_BUILD: "1"
     DOCKER_CERT_PATH: "/certs/client"
 
 run_tests:
-  # We are now faced with the catch-22 chicken-and-egg problem whereby the image which we wish to pull in this job requires an auth, but auth can only be read after the image is pulled.  
-  # So, we will use docker-in-docker (DinD) with a docker-cli as the job image (public, no auth needed), and with docker-dind as a service.  I wish that that gitlab facilitated auth prior to and upon the image that is pulled, but they don't, and I don't want to use a CI variable because this would defy our methodology of storing the github_PAT in the token vault.
   tags: ["dind"]
+  variables:
+    PRIVATE_GH_IMAGE: "${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:remote-patched"
   extends: 
   - .secret_fetcher
   - .dind_base 
@@ -135,11 +130,11 @@ run_tests:
     - echo "$GHCR_PAT" | docker login $CONTAINER_REGISTRY -u $GH_USER_NAME --password-stdin
 
     # Pull your private image
-    - docker pull "${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:remote-patched"
+    - docker pull "${PRIVATE_GH_IMAGE}"
   script:
     # (run multiple commands in same container)
     - |
-      docker run --rm -v "$CI_PROJECT_DIR:/app" -w /app "$PRIVATE_IMAGE" sh -c "
+      docker run --rm -v "$CI_PROJECT_DIR:/app" -w /app "$PRIVATE_GH_IMAGE" sh -c "
         ruby -v
         echo "Running tests in the custom container..."
       "
