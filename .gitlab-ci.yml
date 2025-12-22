@@ -104,7 +104,7 @@ rebuild_ruby_base:
     DOCKER_CERT_PATH: "/certs/client"
 
 run_tests:
-  # We are now faced with the catch-22 chicken-and-egg problem whereby the image which we wish to pull i this job requires an auth, but auth can only be read after the image is pulled.  
+  # We are now faced with the catch-22 chicken-and-egg problem whereby the image which we wish to pull in this job requires an auth, but auth can only be read after the image is pulled.  
   # So, we will use docker-in-docker (DinD) with a docker-cli as the job image (public, no auth needed), and with docker-dind as a service.  I wish that that gitlab facilitated auth prior to and upon the image that is pulled, but they don't, and I don't want to use a CI variable because this would defy our methodology of storing the github_PAT in the token vault.
   tags: ["dind"]
   extends: 
@@ -112,7 +112,7 @@ run_tests:
   stage: app_test
   before_script:
     # Step 1. Install bao dependencies
-    - apk update && apk add --no-cache curl jq && curl -sL https://github.com/openbao/openbao/releases/download/v2.4.4/bao-hsm_2.4.4_Linux_arm64.tar.gz | tar xz -C /usr/local/bin
+    - wget -qO- https://github.com/openbao/openbao/releases/download/v2.4.4/bao_2.4.4_Linux_x64_64.tar.gz | tar xz -C /usr/local/bin
     
     - echo "Authentifying to OpenBao..."
     # Step 2. Login to OpenBao
