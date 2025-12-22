@@ -95,7 +95,6 @@ rebuild_ruby_base:
     FF_NETWORK_PER_BUILD: "1"
 
 run_tests:
-  tags: ["dind"]
   variables:
     PRIVATE_GH_IMAGE: ${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:remote-patched
   extends: 
