@@ -88,7 +88,7 @@ rebuild_ruby_base:
 # Usage: Runs your actual tests using the image from Job 1
 # Base DinD configuration
 .dind_base:
-  image: docker:24.0.5-dind
+  image: docker:24.0.5-cli
   services:
     - name: docker:24.0.5-dind
       alias: docker
@@ -119,7 +119,7 @@ run_tests:
 
     # Clear the vault token (good hygiene)
     - unset VAULT_TOKEN
-    - echo "I have the GHCR_PAT! It is $(echo "{$GHCR_PAT}" | cut -c 1-3)xxx"
+    - echo "I have the GHCR_PAT! It is $(echo "${GHCR_PAT}" | cut -c 1-3)xxx"
 
     # Wait for DinD to be ready (important!)
     - |
