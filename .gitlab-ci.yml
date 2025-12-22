@@ -126,6 +126,8 @@ run_tests:
     - echo "$GHCR_PAT" | docker login $CONTAINER_REGISTRY -u $GH_USER_NAME --password-stdin
 
     - echo "${PRIVATE_GH_IMAGE}"
+    - ls -la /var/run/docker.socket || echo "Socket missing!"
+    - id
     # Pull your private image
     - docker pull ${PRIVATE_GH_IMAGE}
   script:
