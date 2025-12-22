@@ -97,7 +97,7 @@ rebuild_ruby_base:
 run_tests:
   tags: ["dind"]
   variables:
-    PRIVATE_GH_IMAGE: "${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:remote-patched"
+    PRIVATE_GH_IMAGE: ${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:remote-patched
   extends: 
   - .secret_fetcher
   - .docker_cli_base 
@@ -125,6 +125,7 @@ run_tests:
     - "echo \"Authentifying to ${CONTAINER_REGISTRY}\""     
     - echo "$GHCR_PAT" | docker login $CONTAINER_REGISTRY -u $GH_USER_NAME --password-stdin
 
+    - echo "${PRIVATE_GH_IMAGE}"
     # Pull your private image
     - docker pull ${PRIVATE_GH_IMAGE}
   script:
