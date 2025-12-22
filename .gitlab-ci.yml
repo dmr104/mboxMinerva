@@ -126,7 +126,7 @@ run_tests:
     - echo "$GHCR_PAT" | docker login $CONTAINER_REGISTRY -u $GH_USER_NAME --password-stdin
 
     # Pull your private image
-    - docker pull "${PRIVATE_GH_IMAGE}"
+    - docker pull ${PRIVATE_GH_IMAGE}
   script:
     # (run multiple commands in same container)
     - |
