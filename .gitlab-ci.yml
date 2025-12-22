@@ -92,7 +92,6 @@ rebuild_ruby_base:
   services:
     - name: docker:24.0.5-dind
       alias: docker
-      privileged: true
       # Optional: pass extra args to dockerd
       # command: ["--tls=false"]  # Only if you're disabling TLS (not recommended for prod)
   variables:
@@ -107,6 +106,7 @@ rebuild_ruby_base:
 run_tests:
   # We are now faced with the catch-22 chicken-and-egg problem whereby the image which we wish to pull i this job requires an auth, but auth can only be read after the image is pulled.  
   # So, we will use docker-in-docker (DinD) with a docker-cli as the job image (public, no auth needed), and with docker-dind as a service.  I wish that that gitlab facilitated auth prior to and upon the image that is pulled, but they don't, and I don't want to use a CI variable because this would defy our methodology of storing the github_PAT in the token vault.
+  tags: ["dind"]
   extends: 
   - .dind_base 
   stage: app_test
