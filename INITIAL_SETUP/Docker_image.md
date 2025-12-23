@@ -116,7 +116,7 @@ rebuild_ruby_base:
 
     # Step 2. Clear the vault token (good hygiene)
     - unset VAULT_TOKEN
-    - echo "I have the GHCR_PAT! It is $(echo "{$GHCR_PAT}" | cut -c 1-3)xxx"
+    - echo "I have the GHCR_PAT! It is $(echo "${GHCR_PAT}" | cut -c 1-3)xxx"
 
     # Step 3. Build and push
     - echo "Detected changes in build context. Rebuilding base image on Host..."
@@ -213,7 +213,7 @@ rebuild_ruby_base:
 
     # Step 2. Clear the vault token (good hygiene)
     - unset VAULT_TOKEN
-    - echo "I have the GHCR_PAT! It is $(echo "{$GHCR_PAT}" | cut -c 1-3)xxx"
+    - echo "I have the GHCR_PAT! It is $(echo "${GHCR_PAT}" | cut -c 1-3)xxx"
 
     # Step 3. Build and push
     - echo "Detected changes in build context. Rebuilding base image on Host..."

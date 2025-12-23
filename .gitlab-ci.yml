@@ -2,7 +2,7 @@
 
 stages:
   - build_infra
-  - pull_infra
+  - pull_infra_and_test
   - app_test
   - deploy
 
@@ -101,7 +101,7 @@ get_ruby_image_and_test:
   extends: 
   - .secret_fetcher
   - .docker_cli_base 
-  stage: pull_infra
+  stage: pull_infra_and_test
   before_script:
     # Install bao dependencies
     - wget -qO- https://github.com/openbao/openbao/releases/download/v2.4.4/bao_2.4.4_Linux_x86_64.tar.gz | tar xz -C /usr/local/bin
