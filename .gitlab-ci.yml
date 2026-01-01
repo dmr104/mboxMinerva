@@ -25,7 +25,9 @@ variables:
     # This generates the JWT. 
     BAO_VAULT_ID:
       aud: "my-super-secure-app-id"  # The 'aud' MUST match OpenBao's 'bound-audiences'
-
+  before_script: 
+    # Install the docker client utility on top of openbao (`apk add --no-cache docker-cli`), so that the image will be able to talk to our /var/run/docker.sock (podman) in the GitLab Runner which is mapped to $XDG_RUNTIME_DIR"/podman/podman.sock in the Host (see INITIAL_SETUP/Gitlab.sh)
+    - apk add --no-cache docker-cli docker-cli-buildx
   script: 
     - echo "Authentifying to OpenBao..."
 
@@ -49,9 +51,6 @@ rebuild_ruby_base:
   variables:
     # Disable TLS since we are talking to a local Unix socket
     DOCKER_TLS_CERTDIR: ""
-  before_script: 
-    # Install the docker client utility on top of openbao (`apk add --no-cache docker-cli`), so that the image will be able to talk to our /var/run/docker.sock (podman) in the GitLab Runner which is mapped to $XDG_RUNTIME_DIR"/podman/podman.sock in the Host (see INITIAL_SETUP/Gitlab.sh)
-    - apk add --no-cache docker-cli docker-cli-buildx
   script:
     # Step 1: Run the inherited secret_fetcher script to get GHCR_PAT
     - !reference [.secret_fetcher, script]  # <---  Pulls in script from .secret_fetcher
