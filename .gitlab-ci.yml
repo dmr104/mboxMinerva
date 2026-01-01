@@ -1,5 +1,8 @@
 # .gitlab-ci.yml — mboxMinerva CI/CD Pipeline
 
+default:
+  tags: ["main"]
+
 stages:
   - build_infra
   - pull_infra_and_test
@@ -7,8 +10,6 @@ stages:
   - deploy
 
 variables:
-  # Disable per-build isolation so that we can see the previous images on the host
-  FF_NETWORK_PER_BUILD: "false"
   VAULT_ADDR: "http://192.168.1.168:8200"
   GH_USER_NAME: "dmr104"
   CONTAINER_REGISTRY: "ghcr.io"
@@ -87,24 +88,14 @@ rebuild_ruby_base:
 
 # JOB 2: The Consumer
 # Usage: Runs your actual tests using the image from Job 1
-# Base DinD configuration
-.docker_cli_base:
-  image: docker:24.0.5-cli
-  variables:
-    # Tell docker CLI where to find the daemon
-    DOCKER_HOST: "unix:///var/run/docker.sock"
 
 get_ruby_image_and_test:
-  tags: ["main"]
   variables:
     PRIVATE_GH_IMAGE: ${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:remote-patched
   extends: 
   - .secret_fetcher
-  - .docker_cli_base 
   stage: pull_infra_and_test
   before_script:
-    # Install bao dependencies
-    - wget -qO- https://github.com/openbao/openbao/releases/download/v2.4.4/bao_2.4.4_Linux_x86_64.tar.gz | tar xz -C /usr/local/bin
     
     - !reference [.secret_fetcher, script]  # <---  Pulls in script from .secret_fetcher
 
