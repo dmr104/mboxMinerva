@@ -7,7 +7,8 @@ To do this manually, from the repo base directory run
 
 `podman build --layers -t ruby:local-patched -f docker/Dockerfile .`
 
-### Adding to the config.toml of the gitlab-runner pod
+## Adding to the config.toml of the gitlab-runner pod (optional -- see [Automated pulling](#automated-pulling))
+
 Then go to `~/.local/share/containers/storage/volumes/gitlab-runner-config/_data/config.toml` and edit the file to include the following
 ```toml
 [[runners]]
@@ -17,7 +18,7 @@ Then go to `~/.local/share/containers/storage/volumes/gitlab-runner-config/_data
 ```
 This will configure gitlab to use local images
 
-## Optional pushing to ghcr
+## Pushing to ghcr (our approach)
 ### Obtaining classic PAT from ghcr
 Observe that in .gitlab-ci.yml we refer to the image which has been built through the Dockerfile, and we do so locally: which means that this image is a local one.  Note that this solution is not what you want in a production environment, where you ought to push your image which is tagged uniquely and immutably, e.g. ("app:1.2.3_\<SHA\>") to a private container repository every time the Dockerfile changes, and then pull it into your deployment job.  To achieve this in practice, by pushing to github container registry, I first needed to obtain a personal access token to push to this regisry.  So, I logged into github.  I navigated to Developer Settings (click profile picture -> Settings -> Developer Settings).  I created a new classic PAT (Personal access token) with scope *write:packages* to enable download and upload of container images to ghcr (github container registry).
 
@@ -288,7 +289,7 @@ deploy_prod:
 ```
 
 ### Removing from the config.toml of the gitlab-runner pod
-Earlier in this document we configured GitLab to use local images. We went to `~/.local/share/containers/storage/volumes/gitlab-runner-config/_data/config.toml` and edited the file to include the following
+Earlier in this document we optionally configured GitLab to use local images. We went to `~/.local/share/containers/storage/volumes/gitlab-runner-config/_data/config.toml` and edited the file to include the following
 ```toml
 [[runners]]
   [runners.docker]
