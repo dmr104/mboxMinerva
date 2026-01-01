@@ -66,7 +66,7 @@ variables:
 
     # 2. Fetch the GHCR_PAT secret.
     - echo "Fetching secrets from ${PATH_OF_SECRET}"
-    - export GHCR_PAT=$(bao kv get -mount=secret -field=pat $PATH_OF_SECRET)
+    - export GHCR_PAT=$(bao kv get -mount=secret -field=pat2 $PATH_OF_SECRET)
     - echo "I have the secret! It is $(echo "${GHCR_PAT}" | cut -c 1-3)xxx"
 
 # JOB 1: The Builder
@@ -142,14 +142,6 @@ get_ruby_image_and_test:
     - unset VAULT_TOKEN
     - echo "I have the GHCR_PAT! It is $(echo "${GHCR_PAT}" | cut -c 1-3)xxx"
 
-    # Wait for DinD to be ready (important!)
-    - |
-      echo "Waiting for Docker daemon..."
-      for i in $(seq 1 30); do
-        docker info >/dev/null 2>&1 && break
-        echo "Attempt $i: Docker not ready yet..."
-        sleep 1
-      done
     # Authenticate to GHCR using the Vault-fetched PAT
     # GHCR_PAT comes from .secret_fetcher
     - "echo \"Authentifying to ${CONTAINER_REGISTRY}\""     

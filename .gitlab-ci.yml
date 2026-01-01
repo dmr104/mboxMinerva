@@ -95,7 +95,7 @@ rebuild_ruby_base:
     DOCKER_HOST: "unix:///var/run/docker.sock"
 
 get_ruby_image_and_test:
-  tags: ["aux1"]
+  tags: ["main"]
   variables:
     PRIVATE_GH_IMAGE: ${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:remote-patched
   extends: 
