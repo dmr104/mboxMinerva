@@ -30,6 +30,9 @@ My .gitlab-ci.yml now looks like
 ```yaml
 # .gitlab-ci.yml — mboxMinerva CI/CD Pipeline
 
+default:
+  tags: ["main"]
+
 stages:
   - build_infra
   - pull_infra_and_test
@@ -37,8 +40,6 @@ stages:
   - deploy
 
 variables:
-  # Disable per-build isolation so that we can see the previous images on the host
-  FF_NETWORK_PER_BUILD: "false"
   VAULT_ADDR: "http://192.168.1.168:8200"
   GH_USER_NAME: "dmr104"
   CONTAINER_REGISTRY: "ghcr.io"
@@ -117,24 +118,15 @@ rebuild_ruby_base:
 
 # JOB 2: The Consumer
 # Usage: Runs your actual tests using the image from Job 1
-# Base DinD configuration
-.docker_cli_base:
-  image: docker:24.0.5-cli
-  variables:
-    # Tell docker CLI where to find the daemon
-    DOCKER_HOST: "unix:///var/run/docker.sock"
 
 get_ruby_image_and_test:
-  tags: ["aux1"]
   variables:
     PRIVATE_GH_IMAGE: ${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:remote-patched
-  extends: 
-  - .secret_fetcher
-  - .docker_cli_base 
+  extends: .secret_fetcher
   stage: pull_infra_and_test
   before_script:
-    # Install bao dependencies
-    - wget -qO- https://github.com/openbao/openbao/releases/download/v2.4.4/bao_2.4.4_Linux_x86_64.tar.gz | tar xz -C /usr/local/bin
+    # Install the docker client utility on top of openbao (`apk add --no-cache docker-cli`), so that the image will be able to talk to our /var/run/docker.sock (podman) in the GitLab Runner which is mapped to $XDG_RUNTIME_DIR"/podman/podman.sock in the Host (see INITIAL_SETUP/Gitlab.sh)
+    - apk add --no-cache docker-cli docker-cli-buildx
     
     - !reference [.secret_fetcher, script]  # <---  Pulls in script from .secret_fetcher
 
@@ -205,11 +197,11 @@ shutdown_timeout = 0
   session_timeout = 1800
 
 [[runners]]
-  name = "podman-runner"
+  name = "Little John 2"
   url = "http://192.168.1.168:8080"
-  id = 4
-  token = "glrt-r-CVcnRNwjC9IGfFOUynMW86MQp0OjEKdToxCw.01.1214s0uvq"
-  token_obtained_at = 2025-11-20T17:11:05Z
+  id = 7
+  token = "glrt-ZS_OBFUSCATED"
+  token_obtained_at = 2026-01-01T13:16:48Z
   token_expires_at = 0001-01-01T00:00:00Z
   executor = "docker"
   [runners.cache]
@@ -218,7 +210,6 @@ shutdown_timeout = 0
     [runners.cache.gcs]
     [runners.cache.azure]
   [runners.docker]
-    network_mode = "host"
     tls_verify = false
     image = "alpine:latest"
     privileged = false
@@ -226,32 +217,8 @@ shutdown_timeout = 0
     oom_kill_disable = false
     disable_cache = false
     volumes = ["/run/user/1000/podman/podman.sock:/var/run/docker.sock", "/home/dmr104/ruby_projects/Mail_mbox:/mbox:ro", "/home/dmr104/ruby_projects/minerva-cache/email_crypt:/email_crypt:rw", "/home/dmr104/ruby_projects/mboxMinerva:/mboxMinerva:ro", "/home/dmr104/ruby_projects/minerva-cache/processed_data:/processed_data:rw", "/cache"]
+    network_mode = "host"
     shm_size = 0
     network_mtu = 0
 
-[[runners]]
-  tags = ["aux1"]
-  name = "auxiliary 1"
-  url = "http://192.168.1.168:8080"
-  id = 6
-  token = "glrt-ZjR3qgNhTQ9Flx6H-tzsxm86MQp0OjEKdToxCw.01.120v97gt2"
-  token_obtained_at = 2025-12-22T07:40:07Z
-  token_expires_at = 0001-01-01T00:00:00Z
-  executor = "docker"
-  [runners.cache]
-    MaxUploadedArchiveSize = 0
-    [runners.cache.s3]
-    [runners.cache.gcs]
-    [runners.cache.azure]
-  [runners.docker]
-    network_mode = "host"
-    tls_verify = false
-    image = "alpine:latest"
-    privileged = false
-    disable_entrypoint_overwrite = false
-    oom_kill_disable = false
-    disable_cache = false
-    volumes = ["/run/user/1000/podman/podman.sock:/var/run/docker.sock", "/cache"]
-    shm_size = 0
-    network_mtu = 0
 ```
