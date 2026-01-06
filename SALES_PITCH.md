@@ -3,6 +3,48 @@
 
 ---
 
+# Hard Glossary of terms
+- LLM = large language model
+- AI = artificial intelligence
+- PII = personally idendifiable information
+- val = validation
+- GPU = graphics processing unit
+- IT = information technology
+- DevOps = development operation like automation and CI
+- CI = continuous integration
+- ML = machine learning
+- qLoRA = quantized low-rank adaptation
+- DSR = data subject request
+- RAG = retrieval augmentation generation
+- eval = evaluation
+- GDPR = General Data Protecion Regulations
+- CCPR = California Consumer Privacy Ac
+- ROI = return on investment
+- NLP = natural language processing
+- vLLM = virtual LLM
+- on-prem = on premises
+- OSS = open source software
+- OS = operating system
+
+---
+## Customer-Friendly Glossary 
+
+- **Fine-tuning**: Teaching an AI model your specific domain by training it on your data (vs. using a generic model)
+- **QLoRA**: Memory-efficient training method that fits big models on small GPUs
+- **Immutable manifest**: A locked-in list of which data goes into training/validation/test—never changes
+- **Hash-bucketing**: Using a math formula to automatically and fairly assign data to splits
+- **PII (Personally Identifiable Information)**: Names, emails, addresses, IPs—data that can identify a person
+- **Pseudonymization**: Replacing real identities with fake codes (ALIAS_0001) while keeping a secure lookup table
+- **Tombstone**: A marker that says "this data was deleted"—used for GDPR compliance
+- **DSR (Data Subject Request)**: Formal request under GDPR/CCPA to export or delete someone's data
+- **RAG (Retrieval-Augmented Generation)**: AI technique that searches your data and uses results to ground answers (no hallucinations)
+- **vLLM**: High-performance server for running LLMs that handles many queries at once
+- **Perplexity**: A score measuring how "surprised" the model is by test data—lower = better learning
+- **Catastrophic forgetting**: When AI forgets old knowledge while learning new stuff (we prevent this with rehearsal sampling)
+- **git-crypt**: Tool that encrypts specific files in your Git repo (like the PII vault)
+- **GitLab CI/CD**: Automation that runs tests, training, and deployment every time you push code
+
+
 ## 1. Executive Summary
 
 **What is mboxMinerva?**  
@@ -50,8 +92,8 @@ mboxMinerva is a production-grade email archive processing platform that safely 
 ---
 
 ### Objection: "Our email has too much sensitive data."
-**Response**:  
-"That's exactly why we built PII scrubbing into step one. The model trains on pseudonymized text: no real names, emails, or IPs. You control the vault encryption key, and DSR tooling lets you delete or export any individual's data on demand."
+**Response**:
+"That's exactly why we built PII scrubbing into step one. The model trains on pseudonymized text: no real names, emails, or IPs. You control the vault encryption key, and DSR tooling lets you delete or export any individual's data on demand.  DSR is  'Data Subject Request' (e.g. GDPR 'Right to be Forgotten')."
 
 ---
 
@@ -83,7 +125,7 @@ mboxMinerva is a production-grade email archive processing platform that safely 
 ---
 
 ### What are unique thread ids?
-**Customer language**: "thread_id is the conversation key that keeps all emails from one thread glued to the same split to avoid train/val/test leakage and enable sliding-window chunking; It is derived in bin/mbox_pre-parser.rb; then bin/splitter.rb groups on thread_id to assign one deterministic split and annotate window_idx and window_range for that thread."
+**Customer language**: "thread_id is the conversation key that keeps all emails from one thread glued to the same split to avoid train/val/test leakage and enable sliding-window chunking."
 
 **Business value**: "Each thread_id gets ONE frozen split, and all its windows inherit that split, so overlap duplicates data
 within train (or val, or test) for better context coverage, but never leaks the same thread's context across
@@ -103,10 +145,15 @@ splits.  It is split-pure by design.  A thread's "context" = the entire conversa
 
 ---
 
+### Why we do extensive deduplication and spam filtering prior to these eamils entering our pipeline.
+**Customer language**: "AI is like a kind of association between reasoned concepts.  We don't want the same concepts appearing over and over again in the dataset we put into the pipeline as that might reduce the ability for the model to make accurate generalizations at inference time.  So we extensively filter for spam and exact repetitions and near-repetitions (which is called fussy dedupe) as soon as we receive the mbox and before we start working with this SpamAssassined now-tagged mbox." 
+
+**Business Value**: "We are putting quality in so you can get quality out."
+
 ### Why do we protect against contamination between data sets?
 **Customer language**: "Whether by accident or by design, if an employee of your company, or anybody who has sent emails to your mailing list, duplicates a quantity of text from one thread to another thread, then this might leak answers into the test set.  To guard against accidental contaminination, we guard against lines which begin as "On ... (a certain date, somebody) wrote", and to guard more stringently against possible data contamination we run cross-split near-duplication detection using mathematical techniques (e.g. local-sensitivity hashing accelerated >70% Jaccard overlap or >0.9 cosine with strict verification) where similar items collide with a high probability, letting us bucket and find near-duplicates fast before quarantining them."
 
-**Business Value**:"It buys trustworthy evals and repeatable wins (not leakage fueled mirages), fewer regressions and the necessity for long-term support because of a broken model. It provides provable compliance and audit trails, and allows us to view the performance of our model more accurately, and it lowers the total cost of ownership by avoiding bad retrains.  It avoids service level agreement breaches if and when drift or sabotage hit."
+**Business Value**:"It buys trustworthy evals and repeatable wins (not leakage fueled mirages), fewer regressions and less necessity for long-term support because of a broken model. It provides provable compliance and audit trails, and allows us to view the performance of our model more accurately, and it lowers the total cost of ownership by avoiding bad retrains.  It avoids service level agreement breaches if and when drift or sabotage hit."
 
 ---
 
@@ -118,18 +165,20 @@ splits.  It is split-pure by design.  A thread's "context" = the entire conversa
 ---
 
 ### Why timely retraining on a DSR (Data Subject Request)?
-**Customer language**: "When a DSR comes in, the first thing we do is mark the user as tombstoned within the immutable manifest. Then we AFTER WE HAVE RECEIVED so many of these DSL deletion requests, OR after a limited period of time, say, between 24 to 72 hours after the first DSL deletion request, we regenerate the dataset (train.jsonl) within a reasonable time period.
+**Customer language**: "When a DSR comes in, the first thing we do is mark the user as tombstoned within the immutable manifest. Then we *after we have received* so many of these DSL deletion requests, *or* after a limited period of time, say, between 24 to 72 hours after the first DSL deletion request, we regenerate the dataset (train.jsonl) within a reasonable time period.
 
-While not retraining immediately upon every DSR request, we may receive several DSR deletion requests within a time period of a fixed cadence, say, 72 hours: of which we tombstone each of those immediately, and via rematerialization of the RAG Shards--[see TECHNICAL.md](./TECHNICAL.md)-- we stop serving their content and purge any caches, so the data subject will be removed sooner.
+While not retraining immediately upon every DSR request, we may receive several DSR deletion requests within a time period of a fixed cadence, say, 72 hours: of which we tombstone each of those immediately, and via rematerialization of the RAG Shards--[see TECHNICAL.md](./TECHNICAL.md#what-are-rag-shards)-- we stop serving their content and purge any caches, so the data subject will be removed sooner.
 
 **Business value**: "Immediate tombstoning/rematerializing gives you a proof of hard compliance with risk reduction in the sense that you stop serving personal data now, meeting GDPR/CCPA SLAs (service level agreements), cutting fines and liability, preserving trust and contract renewals, which makes enterprise deals with clean audit logs attractive to the customer base, and will avoid costly hotfixes by decoupling what data is being served from slower retraining of models."
 
 ---
 
 ### What is this "train.jsonl" thing?
-**Customer language**: "When I rematerialize the dataset from the immutable manifest, normally only "train.jsonl" gets materialized, and "val.jsonl" and "test.jsonl" remain fixed, except for (a) DSRs, when you re-materialize them to subtract tombstoned rows only, and (b) your planned rollover, when you bring in the newer cohort rows from the immutable manifest to your train/val/test.jsonl, and you bump the pin, and retrain the LoRA adapter, and then you flip the symlink which points from the present adapter to this latest one. Normal weekly rematerializations (e.g. `splitter.rb --pin 2025-01 --materialize train`) leave val.jsonl and test.jsonl untouched."   
+**Customer language**: "When I do normal weekly rematerializations from dataset of the immutable manifest, only "train.jsonl" gets materialized, and "val.jsonl" and "test.jsonl" remain fixed. Normal weekly rematerializations (e.g. `splitter.rb --pin 2025-01 --materialize train`) leave *both* "val.jsonl" and "test.jsonl" untouched.".  Other-than-weekly materializations are: 
+- (a) DSRs, when you re-materialize them to subtract tombstoned rows,  
+- (b) your planned rollover, when you bring in the newer cohort rows from the immutable manifest to your train/val/test.jsonl, and you bump the pin, and retrain the LoRA adapter, and then you flip the symlink which points from the present adapter to this latest one. This updates all three sets, with "train.jsonl" and "val.jsonl" and "test.jsonl" being recreated with additional members. 
 
-**Business value**:"Understanding this at a customer level proves GDPR/DSR (General Data Protection Regulations / Data Subject Request) compliance and reproducibility, setting customer expectations, and turns a scary "black box" in an auditable service level agreement."
+**Business value**:"Understanding this at a customer level proves GDPR/DSR (General Data Protection Regulations / Data Subject Request) compliance and reproducibility, setting customer expectations, and turns a scary "black box" in an auditable service level agreement. Basically, as the newer emails come in weekly, although the manifest ("assignments.json") is the append-only ledger which does get appended, accruing new messages/threads into a deterministic split upon every ingest of each batch, this is distinct from the consequences as rematerializing the "train.jsonl" from it.  Normally, each week, we are only extracting from the manifest the newer version of what can be extrapolated into "train.jsonl" and are leaving "val.jsonl" and "test.jsonl" untouched.  Contrast this to a pin bump where all the data in the manifest is considered to be written into all three."
 
 ---
 
@@ -148,9 +197,9 @@ While not retraining immediately upon every DSR request, we may receive several 
 ---
 
 ### Why does a planned rollover involving flipping a symlink?
-**Customer Language**: "A planned rollover is exactly the process of training, and then the process of validating this new adapter which has been generated from this training.  Then we flip the symlink pointing from the present adapter to this latest one in a controlled step, typically wrapped in a deploy script so we can flip, test, and roll-back if something doesn't look right.
+**Customer Language**: "A planned rollover involves the process of training and the process of validating this new adapter which has been generated from this training.  Then we flip the symlink pointing from the running adapter to this latest one in a controlled step, typically wrapped in a deploy script so we can flip, test, and roll-back if something doesn't look right.
 
-**Business Value**: "Give us atomic, low-risk cutovers and instant rollbacks, which directly translates to fewer outages, cheaper operations, and a much easier way to keep our model uptime and fulfill our SLA reliability promises to customers."
+**Business Value**: "Gives us atomic, low-risk cutovers and instant rollbacks, which directly translates to fewer outages, cheaper operations, and a much easier way to keep our model uptime and fulfill our SLA reliability promises to customers."
 
 ---
 
@@ -168,24 +217,30 @@ While not retraining immediately upon every DSR request, we may receive several 
 
 ---
 
-### Why git-crypt for the Vault?
-**Customer Language**: "The mapping between real identities and pseudonyms lives in an encrypted crypt stored on the backend of a CI (continuous intergration) pipeline. Only authorized team members and CI/CD runners with the right key can decrypt it.  So it is access-controlled."
+### What is "val.jsonl" for?
+**Customer Language**: "This is the validation set which may be thought of like a "practice exam" which the model takes during training, which helps the training automation (or with manual intervention) tune its hyperparameters, while "test.jsonl" is the final "locked exam" used once at the very end of this training to prove that the model actually learnt to make generalisations in its responses rather than just memorising the training data and regurgitating it."
 
-**Business Value**: A separate secret management system lets us centralize, rotate, and audit permission keys and credentials so that they ar enot hard-coded into repos or scatttered across servers, which cuts the risk of a breach, making it safer for many apps and pipelines run in production without outsourcing higher levels of trust to many people.
+**Business Value": "The validation set acts as our project's real-time steering mechanism and as an "early warning system" which allows us to optimize model performance and cease failing training runs early to save computation costs, all the while ensuring that the engine is probably actually learning to generalize before the final audit on the test set."
+
+
+### Tell me about our encrypted email Crypt/Vault?
+**Customer Language**: "The mapping between real identities and pseudonyms lives in an encrypted crypt stored on the backend of a CI (continuous integration) pipeline. Only authorized team members and CI/CD runners with the right key can decrypt it.  So it is access-controlled."
+
+**Business Value**: "A separate secret management system lets us centralize, rotate, and audit permission keys and credentials so that these are not hard-coded into repos or scatttered across servers, which cuts the risk of a breach, making it safer for many apps and pipelines run in production without outsourcing higher levels of trust to many people."
 
 ---
 
 ### Why GitLab CI/CD?
-**Customer Language**: "Every code change triggers automated tests: which involve data integrity checks, security scans, and split validation. When you push to Git, the pipeline does the training, evaluating, and deployment.  There are no manual steps; and thus the experience that simply because 'it worked on my laptop' is not used as a litmus test for other systems and hardware setups."
+**Customer Language**: "Every git commit to the main branch triggers automated tests: which may involve data integrity checks, security scans, and split validation. When you push to GitLab, the pipeline does the training, evaluating, and deployment.  There are no manual steps; and thus the experience that simply because "it worked on my laptop" is not used as a litmus test for other systems and hardware setups."
 
 **Business Value**: "Faster iteration, fewer bugs in production, one-click rollback."
 
 ---
 
 ### Why vLLM for Serving?
-**Customer Language**: "vLLM is like a hyper-efficient switchboard for your GPU.  It serves dozens of simultaneous queries without wasting computation. You buy one GPU, and serve your whole team upon it."
+**Customer Language**: "vLLM is like a hyper-efficient switchboard for your GPU.  It serves dozens of simultaneous queries without wasting computation. It manages GPU memory in a way which is inspired similarly to a traditional OS involving pages, allowing you to handle more concurrent users on a single GPU."
 
-**Business Value**: "Lower hardware cost per query, with faster response times, and scaling with concurrency."
+**Business Value**: "Lower hardware cost per query, with faster response times, and scaling with concurrency. You buy one GPU, and serve your whole team upon it. "
 
 ---
 
@@ -196,7 +251,7 @@ While not retraining immediately upon every DSR request, we may receive several 
 
 ---
 
-## 4. How It Works (End-to-End)
+## 4. How It Works
 
 ### Phase 1: Ingestion & Privacy
 1. **Parse**: Load mbox archives (Thunderbird, Apple Mail, Outlook export)
@@ -243,7 +298,7 @@ While not retraining immediately upon every DSR request, we may receive several 
 - **Risk & compliance**: We can identify sensitive topics, and automate DSR (data service request) workflows
 - **Knowledge retention**: When experts leave, their email-based expertise stays trainable
 
-## 6. Demo Script (15 Minutes)
+## 6. Demo Pitch
 
 ### Setup (Pre-Demo)
 - Have a sanitized mbox archive ready (~10k messages, no real PII)
@@ -253,7 +308,7 @@ While not retraining immediately upon every DSR request, we may receive several 
 
 ---
 
-### Act 1: Ingestion & Privacy (3 min)
+### Act 1: Ingestion & Privacy
 1. **Show**: `bin/mbox_pre-parser sample.mbox`  
    Output: Parsed threads, extracted metadata
 2. **Show**: `bin/pii_scrubber --input emails/ --output scrubbed/ --vault crypt/`  
@@ -262,7 +317,7 @@ While not retraining immediately upon every DSR request, we may receive several 
 
 ---
 
-### Act 2: Splits & Manifests (3 min)
+### Act 2: Splits & Manifests
 1. **Show**: `bin/splitter --input scrubbed/ --output manifest.jsonl`  
    Output: 80/10/10 split, immutable manifest
 2. **Show**: Open `manifest.jsonl` in editor  
@@ -272,7 +327,7 @@ While not retraining immediately upon every DSR request, we may receive several 
 
 ---
 
-### Act 3: Training (4 min)
+### Act 3: Training
 1. **Show**: GitLab CI pipeline UI  
    Jobs: lint → test → train → eval → deploy (all green)
 2. **Show**: `scripts/eval_before_after.py` output  
@@ -281,7 +336,7 @@ While not retraining immediately upon every DSR request, we may receive several 
 
 ---
 
-### Act 4: Serving & RAG (3 min)
+### Act 4: Serving & RAG 
 1. **Show**: `curl http://localhost:8000/v1/chat/completions -d '{"model":"fine-tuned","messages":[{"role":"user","content":"What did we decide about the Q3 pricing strategy?"}]}'`  
    Output: AI-generated answer citing thread IDs
 2. **Show**: RAG query in pgAdmin (optional)  
@@ -290,7 +345,7 @@ While not retraining immediately upon every DSR request, we may receive several 
 
 ---
 
-### Act 5: Governance (2 min)
+### Act 5: Governance
 1. **Show**: `bin/dsr_export --email user@example.com`  
    Output: JSONL of all threads involving that pseudonym
 2. **Show**: `bin/dsr_delete --email user@example.com --dry-run`  
@@ -299,26 +354,8 @@ While not retraining immediately upon every DSR request, we may receive several 
 
 ---
 
-## 7. Glossary (Customer-Friendly)
 
-- **Fine-tuning**: Teaching an AI model your specific domain by training it on your data (vs. using a generic model)
-- **QLoRA**: Memory-efficient training method that fits big models on small GPUs
-- **Immutable manifest**: A locked-in list of which data goes into training/validation/test—never changes
-- **Hash-bucketing**: Using a math formula to automatically and fairly assign data to splits
-- **PII (Personally Identifiable Information)**: Names, emails, addresses, IPs—data that can identify a person
-- **Pseudonymization**: Replacing real identities with fake codes (ALIAS_0001) while keeping a secure lookup table
-- **Tombstone**: A marker that says "this data was deleted"—used for GDPR compliance
-- **DSR (Data Subject Request)**: Formal request under GDPR/CCPA to export or delete someone's data
-- **RAG (Retrieval-Augmented Generation)**: AI technique that searches your data and uses results to ground answers (no hallucinations)
-- **vLLM**: High-performance server for running LLMs that handles many queries at once
-- **Perplexity**: A score measuring how "surprised" the model is by test data—lower = better learning
-- **Catastrophic forgetting**: When AI forgets old knowledge while learning new stuff (we prevent this with rehearsal sampling)
-- **git-crypt**: Tool that encrypts specific files in your Git repo (like the PII vault)
-- **GitLab CI/CD**: Automation that runs tests, training, and deployment every time you push code
-
----
-
-## 8. Roadmap & Maturity Notes
+## 7. Roadmap & Maturity Notes
 
 ### What's Production-Ready Today
 - ✅ Immutable manifests with deterministic splits
@@ -331,7 +368,7 @@ While not retraining immediately upon every DSR request, we may receive several 
 
 ---
 
-## 9. Competitive Positioning
+## 8. Competitive Positioning
 
 | **Competitor** | **Their Pitch** | **Our Counter** |
 |----------------|-----------------|-----------------|
@@ -342,7 +379,7 @@ While not retraining immediately upon every DSR request, we may receive several 
 
 ---
 
-## 10. Closing Tips
+## 9. Closing Tips
 
 1. **Lead with pain**: "Where is your institutional knowledge locked up?" → email, Slack, wikis → "We solve email first, it's the richest data."
 2. **Demo early**: Schedule a technical demo. Seeing is believing.

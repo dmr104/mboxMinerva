@@ -4,6 +4,8 @@
 
 [![License](https://img.shields.io/badge/license-All%20Rights%20Reserved-red.svg)](LICENSE)
 - [INITIAL SETUP](./INITIAL_SETUP/README_FIRST.md)
+- [Sales Pitch](./SALES_PITCH.md)
+- [Technical details](./TECHNICAL.md)
 
 ---
 

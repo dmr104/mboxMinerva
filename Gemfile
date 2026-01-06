@@ -9,8 +9,8 @@ gem 'mail', '~> 2.8'
 # Database for RAG/Context (Requires libpq-dev in Dockerfile)
 gem 'pg', '~> 1.5'
 
-# Contamination Guard (SimHash/Jaccard)
-gem 'simhash', '~> 0.1'
+# fuzzy deduplication prior to manifest (SimHash/Jaccard)
+gem 'simhash2', '~> 0.0.4'
 
 # Unbundled Gems (MANDATORY for Ruby 3.1+)
 gem 'net-smtp', require: false

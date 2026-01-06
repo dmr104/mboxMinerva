@@ -46,7 +46,7 @@ options = {
   window_overlap: 0,     # e.g., 10 messages overlap
   pin: nil               # e.g., '2025-01' - upper-bound cohort_id cutoff
   exclude: nil,              # Path to exclusion_ids.txt
-  materialize: 'all'         # Which splits to materialize
+  materialize: nil         # Which splits to materialize
 }
 
 OptionParser.new do |opts|
@@ -62,6 +62,11 @@ OptionParser.new do |opts|
   opts.on("--exclude FILE", "Exclusion list (row IDs to filter out)") { |v| options[:exclude] = v }
   opts.on("--materialize SPLIT", "Materialize only specific split (train|val|test|all)") { |v| options[:materialize] = v }
 end.parse!
+
+# Require explicit --materialize argument
+if options[:materialize].nil?
+  abort "Error: --materialize requires an explicit argument (train|val|test|all)"
+end
 
 abort "Missing -i input directory" unless options[:input]
 abort "Missing -o output directory" unless options[:output]
@@ -100,7 +105,7 @@ if options[:exclude] && File.exist?(options[:exclude])
 end
 
 emails = []
-Dir.glob("#{options[:input]}/**/*.json").each do |file|
+Dir.glob("#{options[:input]}/**/*.{json,jsonl}").each do |file|
   data = JSON.parse(File.read(file))
   # Handle both single emails and arrays
   batch = data.is_a?(Array) ? data : [data]

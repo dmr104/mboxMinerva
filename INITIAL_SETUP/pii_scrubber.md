@@ -66,10 +66,10 @@ Edit `/etc/gitlab-runner/config.toml` (or wherever your runner lives) to bind th
 
 **Create the directory on your Host:**
 ```bash
-mkdir -p /home/dmr104/ruby_projects/minerva-cache
+mkdir -p /home/dmr104/ruby_projects/minerva-cache/email_crypt
 ```
 
-(Note: If you are using Rootless Podman, ensure `/home/dmr104/ruby_projects/minerva-cache` is owned by the user running the Podman daemon, or use `:Z` if SELinux complains, e.g., `...:/cache:rw,Z`.)
+(Note: If you are using Rootless Podman, ensure `/home/dmr104/ruby_projects/minerva-cache/email_crypt` is owned by the user running the Podman daemon, or use `:Z` if SELinux complains, e.g., `...:/cache:rw,Z`.)
 
 ## **2. Storing the PII salt in Openbao**
 Outside of my repo directory (in `/home/dmr104/ruby_projects`) I have a file called `email_crypt_secret_salt`.
@@ -93,6 +93,8 @@ In your `.gitlab-ci.yml`, you fetch it.
 ```
 
 ## **4. Using the salt**
+Note that this following code is hypothetical because I have not yet tested it at this stage of writing this tutorial instructions.  I am including it to give you an *indication* of what I plan at this stage to do within my code.
+
 In your `.gitlab-ci.yml`, we will hypothetically use something like:
 
 ```yaml
@@ -117,8 +119,6 @@ scrub_data:
     # -  pii_scrubber --vault-dir vault --seed "${THE_SECRET_SALT}" file1.txt file2.txt > output.txt
 ```
 
-Note that this code is hyothetical because I have not yet tested it at this stage of writing this tutorial instructions.  I am including it to give you an *indication* of what I plan to do within my code.
-
 # Reflection
 As I want to run all the ruby code that is within the Host repo (mboxMinerva) within a Container pipeline which runs many ephemeral Container jobs, I want the Dockerfile to use bundler to install all the gems which are required within this project.  The is the standard "Build once" pattern.  The Dockerfile accesses the Host repo via the "build context" (the `.` in  `docker buildx build --load --pull -t ruby:local-patched -f docker/Dockerfile .` within the `.gitlab-ci.yml` file).  Within the Dockerfile we use the `COPY` instruction as in `COPY Gemfile Gemfile.lock ./` and `bundle install` *first* and then we **DON'T** copy the rest of the repo (the actual ruby code) as we don't want to create hundreds of github container images merely to test the ruby code each time it changes.  We instead want the CI Container pipeline to access the code from the Host repo and run it within a Job container within the Container CI (continuous integration) pipeline.  So we **DON'T** bake the repo code into the image for testing, and we **DON'T** map it *through* the Container using an ad-hoc **Bind Mount** (podman run -v /home/dmr104/ruby_projects/mboxMinerva:/mboxMinerva:Z ...), which would project your live Host repo folder directly into the running GitLab-Runner Container such that the CI sibling Job Containers wouldn't be able to "see" this Host repo folder.  What do we do then?  Well, we **DO** specify `/home/dmr104/ruby_projects/mboxMinerva:/mboxMinerva` within the Runner's `config.toml` so that **each** Job executes the latest edits instantly without a rebuild.
 
@@ -126,7 +126,7 @@ As I want to run all the ruby code that is within the Host repo (mboxMinerva) wi
 ```toml
 [[runners]]
   [runners.docker]
-    volumes = ["/run/user/1000/podman/podman.sock:/var/run/docker.sock", "/path/to/host/mbox:/mbox:ro", "/home/dmr104/ruby_projects/minerva-cache:/email_crypt:rw", "/home/dmr104/ruby_projects/mboxMinerva:/mboxMinerva:ro" ] # :ro = read-only, :rw = read-write
+    volumes = ["/run/user/1000/podman/podman.sock:/var/run/docker.sock", "/path/to/host/mbox:/mbox:ro", "/home/dmr104/ruby_projects/minerva-cache/email_crypt:/email_crypt:rw", "/home/dmr104/ruby_projects/mboxMinerva:/mboxMinerva:ro" ] # :ro = read-only, :rw = read-write
 ```
 
 Note that we are **bind mounting** the Host repo read-only because we do *not* want the Container writing to it in any way.
@@ -188,7 +188,7 @@ gem 'mail', '~> 2.8'
 gem 'pg', '~> 1.5'
 
 # Contamination Guard (SimHash/Jaccard)
-gem 'simhash', '~> 0.1'
+gem 'simhash2', '~> 0.0.4'
 
 # Unbundled Gems (MANDATORY for Ruby 3.1+)
 gem 'net-smtp', require: false
@@ -223,15 +223,15 @@ We also need to achieve persistent storage on the Host which is **bind mounted**
 1.  **Git Will Fail:** The Runner tries to `git clone`/`git clean` there; if it sees existing files from the Host, it will likely crash or—worse—**wipe your Host directory** to make room for a clean checkout.
 2.  **Collisions:** If two jobs run at once, they will literally overwrite each other's source code in real-time.
 
-## So do do the following instead:
+## So do the following instead:
 Edit `/etc/gitlab-runner/config.toml` (or wherever your runner lives) to bind the host repo to **all** Job Containers:
 ```toml
 [[runners]]
   [runners.docker]
-    volumes = ["/run/user/1000/podman/podman.sock:/var/run/docker.sock", "/path/to/host/mbox:/mbox:ro", "/home/dmr104/ruby_projects/minerva-cache:/email_crypt:rw", "/home/dmr104/ruby_projects/mboxMinerva:/mboxMinerva:ro", "/home/dmr104/ruby_projects/minerva-cache/processed_data:/processed_data:rw" ] # :ro = read-only, :rw = read-write
+    volumes = ["/run/user/1000/podman/podman.sock:/var/run/docker.sock", "/path/to/host/mbox:/mbox:ro", "/home/dmr104/ruby_projects/minerva-cache/email_crypt:/email_crypt:rw", "/home/dmr104/ruby_projects/mboxMinerva:/mboxMinerva:ro", "/home/dmr104/ruby_projects/minerva-cache/processed_data:/processed_data:rw" ] # :ro = read-only, :rw = read-write
 ```
 
-## What we have done...
+## What we have just done...
 **1. Updated Runner's `config.toml`**:
 We have mounted the host storage to somewhere in the Job Containers like `/processed_data`.  In my case, I have mounted to `/home/dmr104/ruby_projects/minerva-cache/processed_data` on the Host to this place within the Jobs Containers.
 ```toml

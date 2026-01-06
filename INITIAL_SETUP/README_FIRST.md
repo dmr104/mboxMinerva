@@ -10,3 +10,5 @@ Fifthly read [Docker-in-docker](DinD.md)
 
 Sixthly read [How to achieve the creation of manually created temporary Job Containers in development which will have access to the instructions within our .gitlab-ci.yml as well as the rest of the mboxMinerva repo codebase](gitlab-ci-local.md)
 
+Seventhly, install SpamAssassin via the instructions within [spam_assassin](./spam_assassin.md)
+
