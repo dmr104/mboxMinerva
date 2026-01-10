@@ -15,9 +15,9 @@ Well yes, there is.  It is called....
 This a third-party tool which runs on the Host, and which parses your YAML from `.gitlab-ci.yml` and launches local Containers that mount the Host mboxMinerva repo.
 
 To do this:
-1.  **Install it on Host** (if you have Node.js: `npm install -g gitlab-ci-local`, or download the binary from GitHub if not).
-2.  **Run it**: `cd /path/to/mboxMinerva` on Host, then type `gitlab-ci-local`.
-3.  **Result**: It reads your local `.gitlab-ci.yml`, starts containers via Podman, runs the scripts, and prints the output to your terminal—all without a single `git push`.
+1.  **Install it on Host** (if you have Node.js: `npm install gitlab-ci-local`, from the root directory of "mboxMinerva", or download the binary from GitHub if not).
+2.  **Run it**: `cd /path/to/mboxMinerva` on Host, then type `npx gitlab-ci-local --list-all` to examine, and `npx gitlab-ci-local` to run it.
+3.  **Result**: It reads your local `.gitlab-ci.yml`, starts containers via Podman, runs the scripts, and prints the output to your terminal: all without a single `git push`.
 
 Can I run a specific Job only using gitlab-ci-local?
 

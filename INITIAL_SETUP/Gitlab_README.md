@@ -1,5 +1,5 @@
 # Gitlab omnibus and gitlab Runners
-We hereby document how to create and associate a gitlab Runner with the gitlab omnibus community edition.
+We hereby document how to create and associate a gitlab Runner with the gitlab omnibus community edition.  For my development environment, I invoke the running of the gitlab-omnibus and the gitlab-runner podman containers via the `Gitlab.sh` script.  Obviously, this is probably not what you want in your production environment, where these services might run upon separate servers even.  Edit the internal ip addresses within this file for it to work, and if you have the aardvark-dns package on your package manager (which I did not have on deepin linux) then you may wish to amend `Gitlab.sh` according. 
 
 ## Keeping a copy of your gitlab root password
 There is a default user name to access the omnibus gitlab community edition and this username is `root`.
@@ -15,7 +15,7 @@ If you forgot to do this, you can reset it as follows:
 - type `u.save!`
 - type `exit`
 
-Remember to keep a copy of this password safe!
+Remember to keep a copy of this password safe!  You also may have to stop the gitlab container manually and restart it for this state (the password) to become remembered by the gitlab omnibus container.
 
 ## This is an explanation about **[step 4]** of the *Gitlab.sh* file
 

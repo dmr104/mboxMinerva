@@ -75,6 +75,7 @@ fi
 # 4. The handshake between gitlab-runner container and gitlab container.
 echo ""
 echo ">>> Setup complete."
+echo "    If you have not already registered the runner with gitlab omnibus then do the following."
 echo "    Wait for GitLab to boot (check 'podman logs -f gitlab'), then go to:"
 echo "    http://localhost:8080 -> Admin Area -> Runners -> New Instance Runner -> Copy Token"
 echo ""

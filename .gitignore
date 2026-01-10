@@ -120,3 +120,6 @@ spec/fixtures/tmp/
 # === Documentation builds ===
 docs/_build/
 site/
+
+# === for NodeJS ======== (added manually by David)
+node_modules/
