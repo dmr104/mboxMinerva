@@ -33,13 +33,13 @@ variables:
     # 1. Login to OpenBao
     # We send the variable $BAO_VAULT_ID to OpenBao via id tokens: which is a signed JWT embedding with aud (audience).
     - echo "Vault role is $VAULT_ROLE"
-    - export BAO_JWT_TOKEN=$(bao write -field=token auth/jwt/login role=$VAULT_ROLE jwt=$BAO_VAULT_ID)
-    - echo "I have the BAO_JWT_TOKEN! It is $(echo "${BAO_JWT_TOKEN}" | cut -c 1-3)xxx"
+    - export VAULT_TOKEN=$(bao write -field=token auth/jwt/login role=$VAULT_ROLE jwt=$BAO_VAULT_ID)
+    - echo "I have the VAULT_TOKEN! It is $(echo "${VAULT_TOKEN}" | cut -c 1-5)xxx"
 
     # 2. Fetch the GHCR_PAT secret.
     - echo "Fetching secrets from ${PATH_OF_SECRET}"
-    - export GHCR_PAT=$(bao kv get -mount=secret/data -field=pat2 ${PATH_OF_SECRET})
-    - echo "I have the secret! It is $(echo "${GHCR_PAT}" | cut -c 1-3)xxx"
+    - export GHCR_PAT=$(bao kv get -mount=secret/data -field=pat2 $PATH_OF_SECRET)
+    - echo "I have the secret! It is $(echo "${GHCR_PAT}" | cut -c 1-5)xxx"
 
 # JOB 1.1: A Builder
 # Usage: Builds the image ONLY if you touch the file 'docker/Dockerfile.ruby-mboxMinerva'
@@ -60,14 +60,14 @@ rebuild_ruby_base:
     - !reference [.secret_fetcher, script]  # <---  Pulls in script from .secret_fetcher
 
     # Step 2. Clear the vault token (good hygiene)
-    - unset BAO_JWT_TOKEN
-    - echo "I have the GHCR_PAT! It is $(echo "${GHCR_PAT}" | cut -c 1-3)xxx"
+    - unset VAULT_TOKEN
+    - echo "I have the GHCR_PAT! It is $(echo "${GHCR_PAT}" | cut -c 1-5)xxx"
 
     # Step 3. Build and tag
     - echo "Detected changes in build context. Rebuilding base image on Host..."
     # This 'docker build' actually runs on the HOST machine because of the socket mapping.
     # It updates the 'ruby:local-patched' tag in the host's storage.
-    - docker buildx build --load --pull -t ruby:local-patched -f docker/Dockerfile . 
+    - docker buildx build --load --pull -t ruby:local-patched -f docker/Dockerfile.ruby-mboxMinerva . 
     - echo "Have built ruby image from Dockerfile" 
     - docker tag ruby:local-patched "$CONTAINER_REGISTRY/$GH_USER_NAME"/ruby:"$TAG_IMMUTABLE" 
     - docker tag ruby:local-patched "$CONTAINER_REGISTRY/$GH_USER_NAME"/ruby:remote-patched
@@ -88,7 +88,7 @@ rebuild_ruby_base:
       when: on_success
     # 2. FALLBACK: Allow manual triggering in the UI if you ever need to force a rebuild (e.g. clean host)
     - when: manual                # <--- You must click "Play" in the UI.
-    #  allow_failure: false        # The pipeline blocks here until you tell it to proceed.
+      allow_failure: false        # The pipeline blocks here until you tell it to proceed.
 
 # JOB 1.2: Another Builder
 # Usage: Builds the image ONLY if you touch the file 'docker/Dockerfile.openbao-docker'
@@ -109,14 +109,14 @@ build_openbao_docker:
     - !reference [.secret_fetcher, script]  # <---  Pulls in script from .secret_fetcher
 
     # Step 2. Clear the vault token (good hygiene)
-    - unset BAO_JWT_TOKEN
-    - echo "I have the GHCR_PAT! It is $(echo "${GHCR_PAT}" | cut -c 1-3)xxx"
+    - unset VAULT_TOKEN
+    - echo "I have the GHCR_PAT! It is $(echo "${GHCR_PAT}" | cut -c 1-5)xxx"
 
     # Step 3. Build and tag
     - echo "Detected changes in build context. Rebuilding base image on Host..."
     # This 'docker build' actually runs on the HOST machine because of the socket mapping.
     # It updates the 'openbao-docker:local-patched' tag in the host's storage.
-    - docker buildx build --load --pull -t openbao-docker:local-patched -f docker/Dockerfile . 
+    - docker buildx build --load --pull -t openbao-docker:local-patched -f docker/Dockerfile.openbao-docker . 
     - echo "Have built openbao-docker image from Dockerfile" 
     - docker tag openbao-docker:local-patched "$CONTAINER_REGISTRY/$GH_USER_NAME"/openbao-docker:"$TAG_IMMUTABLE" 
     - docker tag openbao-docker:local-patched "$CONTAINER_REGISTRY/$GH_USER_NAME"/openbao-docker:remote-patched
@@ -130,12 +130,14 @@ build_openbao_docker:
     - docker push "$CONTAINER_REGISTRY"/"$GH_USER_NAME"/openbao-docker:remote-patched 
   rules:
     # CONDITION: Only run if these files change in the commit/MR
+    # 1. If the Dockerfile changes, run automatically (on_success)
     - if: '$CI_COMMIT_BRANCH == "main"'
       changes:
         - docker/Dockerfile.openbao-docker
-    # FALLBACK: Allow manual triggering in the UI if you ever need to force a rebuild (e.g. clean host)
-      when: manual                # <--- You must click "Play" in the UI.
-    #  allow_failure: false        # The pipeline blocks here until you tell it to proceed.
+      when: on_success
+    # 2. FALLBACK: Allow manual triggering in the UI if you ever need to force a rebuild (e.g. clean host)
+    - when: manual                # <--- You must click "Play" in the UI.
+      allow_failure: false        # The pipeline blocks here until you tell it to proceed.
 
 # JOB 2: The Consumer
 # Usage: Runs your actual tests using the image from Job 1
@@ -153,8 +155,8 @@ get_ruby_image_and_test:
     - !reference [.secret_fetcher, script]  # <---  Pulls in script from .secret_fetcher
 
     # Clear the vault token (good hygiene)
-    - unset BAO_JWT_TOKEN
-    - echo "I have the GHCR_PAT! It is $(echo "${GHCR_PAT}" | cut -c 1-3)xxx"
+    - unset VAULT_TOKEN
+    - echo "I have the GHCR_PAT! It is $(echo "${GHCR_PAT}" | cut -c 1-5)xxx"
 
     # Authenticate to GHCR using the Vault-fetched PAT
     # GHCR_PAT comes from .secret_fetcher
