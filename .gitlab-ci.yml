@@ -33,7 +33,7 @@ variables:
     # 1. Login to OpenBao
     # We send the variable $BAO_VAULT_ID to OpenBao via id tokens: which is a signed JWT embedding with aud (audience).
     - echo "Vault role is $VAULT_ROLE"
-    - export VAULT_TOKEN=$(bao write -field=token auth/jwt/login role=$VAULT_ROLE jwt=$BAO_VAULT_ID)
+    - export VAULT_TOKEN=${VAULT_TOKEN:-$(bao write -field=token auth/jwt/login role=$VAULT_ROLE jwt=$BAO_VAULT_ID)}
     - echo "I have the VAULT_TOKEN! It is $(echo "${VAULT_TOKEN}" | cut -c 1-5)xxx"
 
     # 2. Fetch the GHCR_PAT secret.
@@ -137,16 +137,19 @@ build_openbao_docker:
       when: on_success
     # 2. FALLBACK: Allow manual triggering in the UI if you ever need to force a rebuild (e.g. clean host)
     - when: manual                # <--- You must click "Play" in the UI.
-      allow_failure: false        # The pipeline blocks here until you tell it to proceed.
+      allow_failure: true        # The pipeline continues running even if the manual job is not run
 
 # JOB 2: The Consumer
 # Usage: Runs your actual tests using the image from Job 1
 
 get_ruby_image_and_test:
   variables:
-    PRIVATE_GH_IMAGE: ${CONTAINER_REGISTRY}/${GH_USER_NAME}/openbao-docker:remote-patched
+    PRIVATE_GH_IMAGE: ${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:remote-patched
   extends: .secret_fetcher
   stage: pull_infra_and_test
+  image:
+    name: ${CONTAINER_REGISTRY}/${GH_USER_NAME}/openbao-docker:remote-patched
+    entrypoint: [""]
   before_script:
     # We have already pre-installed the docker client utility on top of openbao (`apk add --no-cache docker-cli`), so that the image will 
     # be able to talk to our /var/run/docker.sock (podman) in the GitLab Runner which is mapped to $XDG_RUNTIME_DIR"/podman/podman.sock 
