@@ -38,7 +38,7 @@ variables:
 
     # 2. Fetch the GHCR_PAT secret.
     - echo "Fetching secrets from ${PATH_OF_SECRET}"
-    - export GHCR_PAT=$(bao kv get -mount=secret/data -field=pat2 $PATH_OF_SECRET)
+    - export GHCR_PAT=$(bao kv get -mount=secret/data -field=pat2 ${PATH_OF_SECRET})
     - echo "I have the secret! It is $(echo "${GHCR_PAT}" | cut -c 1-3)xxx"
 
 # JOB 1.1: A Builder
@@ -81,11 +81,13 @@ rebuild_ruby_base:
     - docker push "$CONTAINER_REGISTRY"/"$GH_USER_NAME"/ruby:remote-patched 
   rules:
     # CONDITION: Only run if these files change in the commit/MR
+    # 1. If the Dockerfile changes, run automatically (on_success)
     - if: '$CI_COMMIT_BRANCH == "main"'
       changes:
         - docker/Dockerfile.ruby-mboxMinerva
-    # FALLBACK: Allow manual triggering in the UI if you ever need to force a rebuild (e.g. clean host)
-      when: manual                # <--- You must click "Play" in the UI.
+      when: on_success
+    # 2. FALLBACK: Allow manual triggering in the UI if you ever need to force a rebuild (e.g. clean host)
+    - when: manual                # <--- You must click "Play" in the UI.
     #  allow_failure: false        # The pipeline blocks here until you tell it to proceed.
 
 # JOB 1.2: Another Builder
