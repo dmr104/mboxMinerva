@@ -16,7 +16,12 @@ This a third-party tool which runs on the Host, and which parses your YAML from 
 
 To do this:
 1.  **Install it on Host** (if you have Node.js: `npm install gitlab-ci-local`, from the root directory of "mboxMinerva", or download the binary from GitHub if not).
-2.  **Run it**: `cd /path/to/mboxMinerva` on Host, then type `npx gitlab-ci-local --list-all` to examine, and `npx gitlab-ci-local` to run it.
+2.  **Run it**: `cd /path/to/mboxMinerva` on Host, then type `npx gitlab-ci-local --list-all` to examine, and `npx gitlab-ci-local --network host --variable VAULT_TOKEN="$ROOT_TOKEN" --volume /run/user/1000/podman/podman.sock:/var/run/docker.sock` to run it.
+
+For this command to work you will need to have first issued an `export ROOT_TOKEN=$(podman exec systemd-openbao bao login -token-only token=MY_REDACTED_ROOT_TOKEN)`.
+
+Note that we are using our root token here within development. There are other methods available though, like token auth or approle.  The first is the simplest where you can either use the root token directly (bad for prod), or create child tokens via `bao token -create -policy=mypolicy -ttl=1h`, or more commonly just consume tokens which have be *produced by* other auth methods (AppRole, JWT, etc).  For the latter, approle uses a role_id + secret_id pair where you'd first create an approle with `bao write auth/approle/role/local-dev policies=your-policy` to get a token.  You can fetch the role_id with `auth/approle/role/local-dev/role-id` and the secret_id with `auth/approle/role/local-dev/secret-id`.  You would obtain a token via `bao write auth/approle/login role_id=X secret_id=Y` and then use this token to subsequently obtain longer-term variables which are stored within openbao.
+
 3.  **Result**: It reads your local `.gitlab-ci.yml`, starts containers via Podman, runs the scripts, and prints the output to your terminal: all without a single `git push`.
 
 Can I run a specific Job only using gitlab-ci-local?

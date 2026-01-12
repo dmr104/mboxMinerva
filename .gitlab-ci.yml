@@ -15,12 +15,13 @@ variables:
   CONTAINER_REGISTRY: "ghcr.io"
   TAG_IMMUTABLE: $CI_COMMIT_SHORT_SHA
 
-# secret_fetcher (the gitlab-runner will spin up separate job containers on the host using a podman executor, so we NEED an image for those job containers "alpine:latest" which by default will come from docker.io registry)
+# The gitlab-runner will spin up separate job containers on the host using a podman executor, so we NEED an image 
+# for those job containers "openbao/openbao:latest" which by default will come from docker.io registry.
 .secret_fetcher:
   image: openbao/openbao:latest # Gives us the `bao` command
   variables:
     PATH_OF_SECRET: "github-creds"   # This must match the name of our secret with OpenBao's secret engine.
-    VAULT_ROLE: "gitlab-dev-runner-role"
+    VAULT_ROLE: "gitlab-dev-runner-role" # See ./INITIAL_SETUP/Docker_image.md ### The OpenBao UI (The Wiring) #### D. Create the Role (The "Who is allowed" rule)
   id_tokens:
     # This generates the JWT. 
     BAO_VAULT_ID:
@@ -30,18 +31,18 @@ variables:
     - echo "Authentifying to OpenBao..."
 
     # 1. Login to OpenBao
-    # We send the variable $BAO_VAULT_ID to OpenBao via **`id_tokens`** which is a signed JWT embedding with aud (audience).
+    # We send the variable $BAO_VAULT_ID to OpenBao via id tokens: which is a signed JWT embedding with aud (audience).
     - echo "Vault role is $VAULT_ROLE"
-    - export VAULT_TOKEN=$(bao write -field=token auth/jwt/login role=$VAULT_ROLE jwt=$BAO_VAULT_ID)
-    - echo "I have the VAULT_TOKEN! It is $(echo "${VAULT_TOKEN}" | cut -c 1-3)xxx"
+    - export BAO_JWT_TOKEN=$(bao write -field=token auth/jwt/login role=$VAULT_ROLE jwt=$BAO_VAULT_ID)
+    - echo "I have the BAO_JWT_TOKEN! It is $(echo "${BAO_JWT_TOKEN}" | cut -c 1-3)xxx"
 
     # 2. Fetch the GHCR_PAT secret.
     - echo "Fetching secrets from ${PATH_OF_SECRET}"
     - export GHCR_PAT=$(bao kv get -mount=secret -field=pat2 $PATH_OF_SECRET)
     - echo "I have the secret! It is $(echo "${GHCR_PAT}" | cut -c 1-3)xxx"
 
-# JOB 1: The Builder
-# Usage: Builds the image ONLY if you touch files in 'docker/'
+# JOB 1.1: A Builder
+# Usage: Builds the image ONLY if you touch the file 'docker/Dockerfile.ruby-mboxMinerva'
 rebuild_ruby_base:
   extends: .secret_fetcher  # <--- Pulls in variables from .secret_fetcher
   stage: build_infra
@@ -50,14 +51,16 @@ rebuild_ruby_base:
     # Disable TLS since we are talking to a local Unix socket
     DOCKER_TLS_CERTDIR: ""
   before_script: 
-    # Install the docker client utility on top of openbao (`apk add --no-cache docker-cli`), so that the image will be able to talk to our /var/run/docker.sock (podman) in the GitLab Runner which is mapped to $XDG_RUNTIME_DIR"/podman/podman.sock in the Host (see INITIAL_SETUP/Gitlab.sh)
+    # Install the docker client utility on top of openbao (`apk add --no-cache docker-cli`), so that the image will be able to 
+    # talk to our /var/run/docker.sock (podman) in the GitLab Runner which is mapped to $XDG_RUNTIME_DIR"/podman/podman.sock in 
+    # the Host (see INITIAL_SETUP/Gitlab.sh)
     - apk add --no-cache docker-cli docker-cli-buildx
   script:
     # Step 1: Run the inherited secret_fetcher script to get GHCR_PAT
     - !reference [.secret_fetcher, script]  # <---  Pulls in script from .secret_fetcher
 
     # Step 2. Clear the vault token (good hygiene)
-    - unset VAULT_TOKEN
+    - unset BAO_JWT_TOKEN
     - echo "I have the GHCR_PAT! It is $(echo "${GHCR_PAT}" | cut -c 1-3)xxx"
 
     # Step 3. Build and tag
@@ -80,8 +83,54 @@ rebuild_ruby_base:
     # CONDITION: Only run if these files change in the commit/MR
     - if: '$CI_COMMIT_BRANCH == "main"'
       changes:
-        - docker/Dockerfile
-        - docker/**/*
+        - docker/Dockerfile.ruby-mboxMinerva
+    # FALLBACK: Allow manual triggering in the UI if you ever need to force a rebuild (e.g. clean host)
+      when: manual                # <--- You must click "Play" in the UI.
+    #  allow_failure: false        # The pipeline blocks here until you tell it to proceed.
+
+# JOB 1.2: Another Builder
+# Usage: Builds the image ONLY if you touch the file 'docker/Dockerfile.openbao-docker'
+build_openbao_docker:
+  extends: .secret_fetcher  # <--- Pulls in variables from .secret_fetcher
+  stage: build_infra
+    # Inherits the `openbao/openbao:latest` image from .secret_fetcher (so that `bao` auth tool is native). 
+  variables:
+    # Disable TLS since we are talking to a local Unix socket
+    DOCKER_TLS_CERTDIR: ""
+  before_script: 
+    # Install the docker client utility on top of openbao (`apk add --no-cache docker-cli`), so that the image will be able to 
+    # talk to our /var/run/docker.sock (podman) in the GitLab Runner which is mapped to $XDG_RUNTIME_DIR"/podman/podman.sock in 
+    # the Host (see INITIAL_SETUP/Gitlab.sh)
+    - apk add --no-cache docker-cli docker-cli-buildx
+  script:
+    # Step 1: Run the inherited secret_fetcher script to get GHCR_PAT
+    - !reference [.secret_fetcher, script]  # <---  Pulls in script from .secret_fetcher
+
+    # Step 2. Clear the vault token (good hygiene)
+    - unset BAO_JWT_TOKEN
+    - echo "I have the GHCR_PAT! It is $(echo "${GHCR_PAT}" | cut -c 1-3)xxx"
+
+    # Step 3. Build and tag
+    - echo "Detected changes in build context. Rebuilding base image on Host..."
+    # This 'docker build' actually runs on the HOST machine because of the socket mapping.
+    # It updates the 'openbao-docker:local-patched' tag in the host's storage.
+    - docker buildx build --load --pull -t openbao-docker:local-patched -f docker/Dockerfile . 
+    - echo "Have built openbao-docker image from Dockerfile" 
+    - docker tag openbao-docker:local-patched "$CONTAINER_REGISTRY/$GH_USER_NAME"/openbao-docker:"$TAG_IMMUTABLE" 
+    - docker tag openbao-docker:local-patched "$CONTAINER_REGISTRY/$GH_USER_NAME"/openbao-docker:remote-patched
+
+    # Step 4. Auth and push to GHCR
+    - "echo \"Authentifying to ${CONTAINER_REGISTRY}\"" 
+    - echo "$GHCR_PAT" | docker login $CONTAINER_REGISTRY -u $GH_USER_NAME --password-stdin 
+    - "echo \"Authentified via docker to ${CONTAINER_REGISTRY}\"" 
+    - "echo \"Pushing openbao-docker:local-patched to ${CONTAINER_REGISTRY}\"" 
+    - docker push "$CONTAINER_REGISTRY"/"$GH_USER_NAME"/openbao-docker:"$TAG_IMMUTABLE" 
+    - docker push "$CONTAINER_REGISTRY"/"$GH_USER_NAME"/openbao-docker:remote-patched 
+  rules:
+    # CONDITION: Only run if these files change in the commit/MR
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      changes:
+        - docker/Dockerfile.openbao-docker
     # FALLBACK: Allow manual triggering in the UI if you ever need to force a rebuild (e.g. clean host)
       when: manual                # <--- You must click "Play" in the UI.
     #  allow_failure: false        # The pipeline blocks here until you tell it to proceed.
@@ -91,17 +140,18 @@ rebuild_ruby_base:
 
 get_ruby_image_and_test:
   variables:
-    PRIVATE_GH_IMAGE: ${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:remote-patched
+    PRIVATE_GH_IMAGE: ${CONTAINER_REGISTRY}/${GH_USER_NAME}/openbao-docker:remote-patched
   extends: .secret_fetcher
   stage: pull_infra_and_test
   before_script:
-    # Install the docker client utility on top of openbao (`apk add --no-cache docker-cli`), so that the image will be able to talk to our /var/run/docker.sock (podman) in the GitLab Runner which is mapped to $XDG_RUNTIME_DIR"/podman/podman.sock in the Host (see INITIAL_SETUP/Gitlab.sh)
-    - apk add --no-cache docker-cli docker-cli-buildx
+    # We have already pre-installed the docker client utility on top of openbao (`apk add --no-cache docker-cli`), so that the image will 
+    # be able to talk to our /var/run/docker.sock (podman) in the GitLab Runner which is mapped to $XDG_RUNTIME_DIR"/podman/podman.sock 
+    # in the Host (see INITIAL_SETUP/Gitlab.sh)
     
     - !reference [.secret_fetcher, script]  # <---  Pulls in script from .secret_fetcher
 
     # Clear the vault token (good hygiene)
-    - unset VAULT_TOKEN
+    - unset BAO_JWT_TOKEN
     - echo "I have the GHCR_PAT! It is $(echo "${GHCR_PAT}" | cut -c 1-3)xxx"
 
     # Authenticate to GHCR using the Vault-fetched PAT

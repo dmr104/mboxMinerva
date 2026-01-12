@@ -2,21 +2,31 @@
 
 I wish that gitlab facilitated auth prior to, and upon, the image that is pulled, yet they don't; and still I don't want to use a CI variable because this would defy our methodology of storing the github_PAT in the token vault.
 
-It might be thought that we are now faced with the catch-22 chicken-and-egg problem whereby the image which we wish to pull in this job requires an auth, but auth can only be read after the image is pulled, and that we ought to use docker-in-docker (DinD) with a docker-cli as the job image (public, no auth needed), and with docker-dind as a service.  But this is not necessary.  None of this is necessary because socket-mounting doesn't block auth at all. DinD was never *required* for private registry auth. It just isolates the daemon.  Socket-mounting shares the Host's Podman daemon whereby auth still works per-container.  In our case, **Host Podman** is the one true daemon, which is parent to all, and which has spawned the `gitlab-runner` **Runner Manager** container which *asks Host Podman via the socket* to spawn Job Containers (which are siblings to the Runner Manager).  With socket mounting, everyone talks to **Host Podman**, and shares its cache.  If DinD would be used (which we are not doing) then this DinD would add another sibling (a docker:dind **service container**) running as its own isolated daemon which runs a *second* Docker daemon inside of it, and the docker:cli Job Containers (which have also been spawned by **Host Podman**) would talk to this *inner* daemon (which is within the docker:dind service) via tcp://docker:2376, not the outer Docker daemon, such that all images either built or pulled exist only within that ephemeral dind service container's storage.
+It might be thought that we are now faced with the catch-22 chicken-and-egg problem whereby the image which we wish to pull in this job requires an auth, but auth can only be read after the image is pulled, and that we ought to use docker-in-docker (DinD) with a docker-cli as the job image (public, no auth needed), and with docker-dind as a service.  But this is not necessary.  None of this is necessary because socket-mounting doesn't block auth at all. DinD was never *required* for private registry auth. It just isolates the daemon. This means that the job would run its own private "nested" Docker engine inside the Job container, keeping its images and cache completely separate from the Host and other jobs which are siblings to the **Runner Manager** , but not jobs which which the DinD is parent to.   
 
-## But, ...
+If DinD would be used (which we are not doing) then this DinD daemon isn't a sibling to **Runner Manager**.  It would run *inside* that Job Container which invoked it as a sidecar service; and when that particular Job Container terminates, the DinD living inside it dies too, along with any child containers it spawned and all cached layers.  The whole sandbox evaporates together. 
 
-Because in the gitlab Runner's config.toml, we have already mounted Podman's socket rootlessly as our user (from the Host's point of view): `"/run/user/1000/podman/podman.sock:/var/run/docker.sock"`, if we try to run DinD (docker in docker) the latter (outer level docker) wants to create a daemon at `/var/run/docker.sock` and fails, because this outer level docker is running as root (from the CI job Container's point of view) and this is not compatible with the user Podman Runner Manager (your `gitlab-runner` container) from the Host's point of view; but if we remove this line from the config, then ***any*** other job which is not DinD will fail.  
+The DinD daemon itself runs as a sibling service container alongside the CI job that spawned it, and both are siblings to **Runner Manager** whose parent is **Host Podman**.
 
-## The fix, ...
+With DinD, each job re-pulls base images and rebuilds layers from scratch, discarding it all when the job ends.  DinD throws away any Job containers and their consequences (images, etc) which a specific DinD spawns as part of its work, as these "job containers" (which the DinD spawns inside it own isolated namespace) share that particular daemon's cache, and the moment the job which created this particular daemon ends.
+
+To make things more complicated, within this *inner* daemon we could add another sibling (a "docker:dind" **service container**) running as its own isolated daemon which runs a *second* Docker daemon inside of it; and we could further have "docker:cli" Job Containers (which have also been spawned by **Host Podman**) which could talk to this *second* daemon. 
+
+Socket-mounting, however, shares the Host's Podman daemon, whereby auth still works per-container.  In our case, **Host Podman** is the one true daemon, which is parent to all, and which has spawned the `gitlab-runner` **Runner Manager** container which *asks Host Podman via the socket* to spawn Job Containers (which are siblings to the **Runner Manager**).  With socket mounting, everyone talks to **Host Podman**, and shares its cache. Henceforth, because all jobs share the Host's Podman daemon via the socket, the first job's `docker login` (inside the ".gitlab-ci.yml" file) authentifies the Host itself, and as **Host Podman** is the persistent parent for both the **Runner Manager** and **Job Containers**, it (the first job's `docker login`) authentifies all subsequent sibling jobs also. 
+
+We have chosen a single-runner Socket-Binding approach, also known as DooD (docker-outside-of-Docker) because we also want to keep "shared host caching": which is that the host's single Podman daemon will keep pulled images and built layers on disk, so Job B reuses what Job A already downloaded. 
+
+# As an aside...
+
+Even if we would wish to use DinD: because in the gitlab Runner's "config.toml", we have already mounted Podman's socket rootlessly as our user (from the Host's point of view), `"/run/user/1000/podman/podman.sock:/var/run/docker.sock"`; if we try to run DinD (docker in docker) the latter (outer level docker) wants to create a daemon at `/var/run/docker.sock` and fails, because this outer level docker is running as root (from the CI job Container's point of view) and this is not compatible with the user Podman Runner Manager (your `gitlab-runner` container) from the Host's point of view; yet if we remove this line from the config, then ***any*** other job which is not DinD will fail.  
+
+## The hypothetical fix... 
 
 So the fix should be to add a *second* `[[runners]]` entry in the config.toml with a unique tag (e.g. `tags = ["dind"]`) with *no* socket binding.  The way to achieve this should be done by creating a new runner entry in the Gitlab UI to generate a fresh, unique token for this specific "dind" runner, and then running `gitlab-runner register` pasting in this token.
 
 Admin -> CI/CD -> Runners -> create new runner -> tags "dind" -> copy the token
 
-# Auxiliary runner setup
-
-I will change the tag from "dind" to "aux1" now that we are no longer using docker-in-docker.
+## The hypothetical auxiliary runner setup... 
 
 I have run `podman exec -it gitlab-runner gitlab-runner register` registering the token I have copied when creating the new git runner within the podman Runner Container (with the tag "aux1"), and I have specified the url as: `http://192.168.1.168:8080`.
 

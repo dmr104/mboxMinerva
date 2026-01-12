@@ -1,0 +1,3 @@
+FROM openbao/openbao.latest
+
+RUN apk add --no-cache docker-cli docker-cli-buildx
