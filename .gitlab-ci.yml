@@ -88,7 +88,7 @@ rebuild_ruby_base:
       when: on_success
     # 2. FALLBACK: Allow manual triggering in the UI if you ever need to force a rebuild (e.g. clean host)
     - when: manual                # <--- You must click "Play" in the UI.
-      allow_failure: false        # The pipeline blocks here until you tell it to proceed.
+      allow_failure: true        # The pipeline continues running even if the manual job is not run
 
 # JOB 1.2: Another Builder
 # Usage: Builds the image ONLY if you touch the file 'docker/Dockerfile.openbao-docker'
