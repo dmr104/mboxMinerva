@@ -22,6 +22,7 @@ variables:
   variables:
     PATH_OF_SECRET: "github-creds"   # This must match the name of our secret with OpenBao's secret engine.
     VAULT_ROLE: "gitlab-dev-runner-role" # See ./INITIAL_SETUP/Docker_image.md ### The OpenBao UI (The Wiring) #### D. Create the Role (The "Who is allowed" rule)
+    BAO_ADDR: "http://192.168.1.168:8200" # Specfies the API address to the bao command
   id_tokens:
     # This generates the JWT. 
     BAO_VAULT_ID:
@@ -33,7 +34,7 @@ variables:
     # 1. Login to OpenBao
     # We send the variable $BAO_VAULT_ID to OpenBao via id tokens: which is a signed JWT embedding with aud (audience).
     - echo "Vault role is $VAULT_ROLE"
-    - export VAULT_TOKEN=${VAULT_TOKEN:-$(bao write -field=token auth/jwt/login role=$VAULT_ROLE jwt=$BAO_VAULT_ID)}
+    - export VAULT_TOKEN="${VAULT_TOKEN:-$(bao write -field=token auth/jwt/login role=$VAULT_ROLE jwt=$BAO_VAULT_ID)}"
     - echo "I have the VAULT_TOKEN! It is $(echo "${VAULT_TOKEN}" | cut -c 1-5)xxx"
 
     # 2. Fetch the GHCR_PAT secret.
