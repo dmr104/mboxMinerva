@@ -10,10 +10,10 @@ stages:
   - deploy
 
 variables:
-  VAULT_ADDR: "http://192.168.1.168:8200"
   GH_USER_NAME: "dmr104"
   CONTAINER_REGISTRY: "ghcr.io"
   TAG_IMMUTABLE: $CI_COMMIT_SHORT_SHA
+  DOCKER_TLS_CERTDIR: ""  # Disables TLS since we are talking to a local Unix socket
 
 # The gitlab-runner will spin up separate job containers on the host using a podman executor, so we NEED an image 
 # for those job containers "openbao/openbao:latest" which by default will come from docker.io registry.
@@ -33,7 +33,7 @@ variables:
     # 1. Login to OpenBao
     # We send the variable $BAO_VAULT_ID to OpenBao via id tokens: which is a signed JWT embedding with aud (audience).
     - echo "Vault role is $VAULT_ROLE"
-    - export VAULT_TOKEN=$(bao write -field=token auth/jwt/login role=$VAULT_ROLE jwt=$BAO_VAULT_ID)
+    - export VAULT_TOKEN=${VAULT_TOKEN:-$(bao write -field=token auth/jwt/login role=$VAULT_ROLE jwt=$BAO_VAULT_ID)}
     - echo "I have the VAULT_TOKEN! It is $(echo "${VAULT_TOKEN}" | cut -c 1-5)xxx"
 
     # 2. Fetch the GHCR_PAT secret.
@@ -47,9 +47,6 @@ rebuild_ruby_base:
   extends: .secret_fetcher  # <--- Pulls in variables from .secret_fetcher
   stage: build_infra
     # Inherits the `openbao/openbao:latest` image from .secret_fetcher (so that `bao` auth tool is native). 
-  variables:
-    # Disable TLS since we are talking to a local Unix socket
-    DOCKER_TLS_CERTDIR: ""
   before_script: 
     # Install the docker client utility on top of openbao (`apk add --no-cache docker-cli`), so that the image will be able to 
     # talk to our /var/run/docker.sock (podman) in the GitLab Runner which is mapped to $XDG_RUNTIME_DIR"/podman/podman.sock in 
@@ -96,14 +93,14 @@ build_openbao_docker:
   extends: .secret_fetcher  # <--- Pulls in variables from .secret_fetcher
   stage: build_infra
     # Inherits the `openbao/openbao:latest` image from .secret_fetcher (so that `bao` auth tool is native). 
-  variables:
-    # Disable TLS since we are talking to a local Unix socket
-    DOCKER_TLS_CERTDIR: ""
   before_script: 
     # Install the docker client utility on top of openbao (`apk add --no-cache docker-cli`), so that the image will be able to 
     # talk to our /var/run/docker.sock (podman) in the GitLab Runner which is mapped to $XDG_RUNTIME_DIR"/podman/podman.sock in 
     # the Host (see INITIAL_SETUP/Gitlab.sh)
     - apk add --no-cache docker-cli docker-cli-buildx
+    # We have hereby pre-installed the docker client utility on top of openbao (`apk add --no-cache docker-cli`), so that the image will 
+    # be able to talk to our /var/run/docker.sock (podman) in the GitLab Runner which is mapped to $XDG_RUNTIME_DIR"/podman/podman.sock 
+    # in the Host (see INITIAL_SETUP/Gitlab.sh)
   script:
     # Step 1: Run the inherited secret_fetcher script to get GHCR_PAT
     - !reference [.secret_fetcher, script]  # <---  Pulls in script from .secret_fetcher
@@ -143,19 +140,17 @@ build_openbao_docker:
 # Usage: Runs your actual tests using the image from Job 1
 
 get_ruby_image_and_test:
-  variables:
-    PRIVATE_GH_IMAGE: ${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:remote-patched
-  extends: .secret_fetcher
+  extends: .secret_fetcher  # <--- Pulls in variables from .secret_fetcher
   stage: pull_infra_and_test
   image:
-    name: ${CONTAINER_REGISTRY}/${GH_USER_NAME}/openbao-docker:remote-patched
-    entrypoint: [""]
+    name: ${CONTAINER_REGISTRY}/${GH_USER_NAME}/openbao-docker:remote-patched 
+  variables:
+    PRIVATE_RUBY_GH_IMAGE: ${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:remote-patched
   before_script:
-    # We have already pre-installed the docker client utility on top of openbao (`apk add --no-cache docker-cli`), so that the image will 
-    # be able to talk to our /var/run/docker.sock (podman) in the GitLab Runner which is mapped to $XDG_RUNTIME_DIR"/podman/podman.sock 
-    # in the Host (see INITIAL_SETUP/Gitlab.sh)
-    
+    # Run the inherited secret_fetcher script to get GHCR_PAT
     - !reference [.secret_fetcher, script]  # <---  Pulls in script from .secret_fetcher
+
+    - echo "Authentifying to OpenBao..."
 
     # Clear the vault token (good hygiene)
     - unset VAULT_TOKEN
@@ -166,15 +161,15 @@ get_ruby_image_and_test:
     - "echo \"Authentifying to ${CONTAINER_REGISTRY}\""     
     - echo "$GHCR_PAT" | docker login $CONTAINER_REGISTRY -u $GH_USER_NAME --password-stdin
 
-    - echo "${PRIVATE_GH_IMAGE}"
+    - echo "${PRIVATE_RUBY_GH_IMAGE}"
     - ls -la /var/run/docker.sock || echo "Socket missing!"
     - id
     # Pull your private image
-    - docker pull ${PRIVATE_GH_IMAGE}
+    - docker pull ${PRIVATE_RUBY_GH_IMAGE}
   script:
     # (run multiple commands in same container)
     - |
-      docker run --rm -w /app "$PRIVATE_GH_IMAGE" sh -c "
+      docker run --rm -w /app "$PRIVATE_RUBY_GH_IMAGE" sh -c "
         ruby -v
         echo "Running tests in the custom container..."
       "

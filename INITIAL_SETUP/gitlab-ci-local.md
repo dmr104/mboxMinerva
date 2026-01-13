@@ -31,7 +31,7 @@ rebuild_ruby_base > * missing token
 ```
 If you have understood this, you will also understand that the variable as VAULT_TOKEN injected into th `gitlab-ci-local` command will not be fallen back upon, but overwritten.  So within our .gitlab-ci.yml file we shall set the variable VAULT_TOKEN only if VAULT_TOKEN is not already set.
 We do this in the following manner:
-```
+```yaml
 export VAULT_TOKEN=${VAULT_TOKEN:-$(bao write -field=token auth/jwt/login role=$VAULT_ROLE jwt=$BAO_VAULT_ID)}
 ```
 
@@ -46,7 +46,7 @@ Yes, you can. Run `gitlab-ci-local <job_name>` to run just that job, and you can
 ## How does this asymmetric trust thing work?
 Well, Gitlab signs a JWT (the `CI_JOB_JWT` or `id_tokens`) with its private key. OpenBao was preconfigured with GitLab's JWKS URL or public key, so when your job calls `bao write auth/jwt/login`, OpenBao validates the signature against that public key without ever talking to GitLab directly.
 
-## Speeding up the dev time.
+# Speeding up the dev time.
 Is there any way I can speed up the development time as it takes time to `apk add` every time I wish to run this job to test the script contained within get_ruby_image_and_test?  I am thinking of having an intermediate image cached which has `apk add --no-cache docker-cli docker-cli-buildx` already baked into it.  Answer.  This is feasible and readily doable.  We create another dockerfile called "Dockerfile.openbao-docker" which contains:
 ```
 FROM openbao/openbao:latest
@@ -54,3 +54,87 @@ FROM openbao/openbao:latest
 RUN apk add --no-cache docker-cli docker-cli-buildx
 ```
 We automate the building of it (within .gitlab-ci.yml) and pushing of it to GHCR (Github Container registry), and then use this pre-baked image within the Job as get_ruby_image_and_test instead of the pre-baked image which lacks the docker commands. This way we will shave off the apk overhead by every run and only pay for it once when we are building that intermediate layer.
+
+However this in turn will mean that we simply cannot just use the following within the get_ruby_image_and_test Job Container:
+```yaml
+get_ruby_image_and_test:
+  stage: pull_infra_and_test
+  image:
+    name: ${CONTAINER_REGISTRY}/${GH_USER_NAME}/openbao-docker:remote-patched
+  extends: .secret_fetcher
+```
+The reason why we cannot do this is because this image requires a github_PAT which is to be accessed by the .secret_fetcher.  If we try this it will result in a "Runner system failure", with an error message which unkindly dictates that the "job failed to pull image" and that it is "unable to retrieve the auth token" and that we are "unauthorised" with an "invalid username/password". Please note that this job may still run though if and when we invoke it through gitlab-ci-local because gitlab-ci-local may find the local cached image (see `podman images`) and skip the pull entirely, not to mention the possibility that your local docker/podman daemon may have already cached credentials from a previous `docker login ghcr.io` session in `~/.docker/config.json` on your Host machine. To guard against the possibility that gitlab-ci-local may find the local cached image amend your command of invocation to use the `--pull-policy always` option, to become:
+```
+npx gitlab-ci-local --network host --variable VAULT_TOKEN="$ROOT_TOKEN" --volume /run/user/1000/podman/podman.sock:/var/run/docker.sock --pull-policy always get_ruby_image_and_test
+```
+This should help to assist towards avoiding false positives.
+
+Now to address the issue whereby the "openbao-docker:remote-patched" requires the github_PAT, and .secret_fetcher which acquires this PAT (personal access token) cannot access the access token until the image that requires it has been pulled.  We could adopt the classic DooD (Docker-out-of-Docker) bootstrap pattern. Recall that DooD means that we are mounting a host's `/run/user/1000/podman/podman.sock:` or `${XDG_RUNTIME_DIR}/podman/podman.sock` into the Job Container itself so that the Job can launch "sibling" Containers on the same host rather than trying to nest a full daemon inside itself. 
+
+The bootstrap pattern we might use would be to start our Job with a public image that has docker CLI (command line interface) (like the image as `docker:cli`), and then use this docker CLI to pull the ***public*** (very important that it is public) image as "openbao-docker:remote-patched" which we will then use to do what is required to fetch the PAT (using the `.secret_fetcher` helper as "openbao-docker:remote-patched" has the `bao` command) and use this PAT to login to GHCR; and then finally pull the private ruby-based image for the actual work.  This is all done via the shared socket, requiring no `image:`-nesting.  
+
+An example of `image:`-nesting which is *not* DinD is that of having a "builder" Job where you use `image: node:latest` to compile your app and *inside* that Job's script you run `docker build` via the Host socket.  The Node Container and the resulting app Container are siblings on the Host, not one inside the other's daemon.  
+
+An example of `image:`-nesting which *is* DinD would be where we utilize `image: docker:cli` with `services: [docker:dind]` and `DOCKER_HOST: tcp://docker:2376`.  This way the Job Container talks over TCP to a *second* **inner** container running its own isolated daemon complete with separate image cache and storage.  The nested daemon is what makes it "in Docker", rather than "out of Docker".
+
+## The following is what we are talking about
+Just use a ***public*** image of our specially baked "openbao-docker".
+
+In your GitHub profile or organizations **Packages** tab, click your image name, then **Package Settings** at the bottom right, and scroll down to the "Danger Zone" to hit "Change visibility" and make it public. In GHCR this now **public** package (docker container image) will now allow anonymous access and can be pulled without authentifying or signing in via the CLI. Under "Manage Actions access" I selected "write" as I want my github user account to be able to upload and download this package and read and write its metadata, but I don't really need my user to be able to grant read, write, or admin roles to other users for that "openbao-docker" container package.
+
+## The following is a way to avoid using public containers at all 
+The following is a bit ugly but it does work.  It is a way to implement a nested "openbao" within docker:cli in order to grab the credentials and pull our ***private*** ruby image. 
+
+```yaml
+scratch_ruby_image_and_test:
+  stage: pull_infra_and_test
+  image:
+    name: docker:cli
+  variables:
+    VAULT_ADDR: "http://192.168.1.168:8200"
+    PRIVATE_RUBY_GH_IMAGE: ${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:remote-patched
+    PATH_OF_SECRET: "github-creds"   # This must match the name of our secret with OpenBao's secret engine.
+    VAULT_ROLE: "gitlab-dev-runner-role" # See ./INITIAL_SETUP/Docker_image.md ### The OpenBao UI (The Wiring) #### D. Create the Role (The "Who is allowed" rule)
+  id_tokens:
+    # This generates the JWT. 
+    BAO_VAULT_ID:
+      aud: "my-super-secure-app-id"  # The 'aud' MUST match OpenBao's 'bound-audiences'
+
+  before_script:
+    - docker pull openbao/openbao
+
+    - echo "Authentifying to OpenBao..."
+
+    # 1. Login to OpenBao
+    # We send the variable $BAO_VAULT_ID to OpenBao via id tokens: which is a signed JWT embedding with aud (audience).
+    - echo "Vault role is $VAULT_ROLE"
+    - export VAULT_TOKEN=${VAULT_TOKEN:-$(docker run --rm -e VAULT_ADDR="$VAULT_ADDR" openbao/openbao bao write -field=token auth/jwt/login role=$VAULT_ROLE jwt="$BAO_VAULT_ID")}
+    - echo "I have the VAULT_TOKEN! It is $(echo "${VAULT_TOKEN}" | cut -c 1-5)xxx"
+
+    # 2. Fetch the GHCR_PAT secret.
+    - echo "Fetching secrets from ${PATH_OF_SECRET}"
+    - export GHCR_PAT=$(docker run --rm -e VAULT_ADDR="$VAULT_ADDR" -e VAULT_TOKEN="$VAULT_TOKEN" openbao/openbao bao kv get -mount=secret/data -field=pat2 $PATH_OF_SECRET)
+    - echo "I have the secret! It is $(echo "${GHCR_PAT}" | cut -c 1-5)xxx"
+
+    # Clear the vault token (good hygiene)
+    - unset VAULT_TOKEN
+    - echo "I have the GHCR_PAT! It is $(echo "${GHCR_PAT}" | cut -c 1-5)xxx"
+
+    # Authenticate to GHCR using the Vault-fetched PAT
+    # GHCR_PAT comes from .secret_fetcher
+    - "echo \"Authentifying to ${CONTAINER_REGISTRY}\""     
+    - echo "$GHCR_PAT" | docker login $CONTAINER_REGISTRY -u $GH_USER_NAME --password-stdin
+
+    - echo "${PRIVATE_RUBY_GH_IMAGE}"
+    - ls -la /var/run/docker.sock || echo "Socket missing!"
+    - id
+    # Pull your private image
+    - docker pull ${PRIVATE_RUBY_GH_IMAGE}
+  script:
+    # (run multiple commands in same container)
+    - |
+      docker run --rm -w /app "$PRIVATE_RUBY_GH_IMAGE" sh -c "
+        ruby -v
+        echo "Running tests in the custom container..."
+      "
+```
