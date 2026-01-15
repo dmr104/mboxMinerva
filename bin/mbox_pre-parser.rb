@@ -58,7 +58,7 @@
 # =============================================================================
 
 require 'json'
-require 'digest/sha256'
+require 'digest'
 require 'mail'
 require 'optparse'
 require 'date'
