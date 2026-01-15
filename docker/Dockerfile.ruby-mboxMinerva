@@ -29,7 +29,7 @@ WORKDIR /mboxMinerva
 COPY Gemfile Gemfile.lock ./
 
 # 4. Install Ruby Dependencies
-RUN bundle install --jobs=4 --retry=3
+RUN bundle install
 
 # 5. Runtime Configuration
 #    We DO NOT copy source code here (./lib, ./bin).
