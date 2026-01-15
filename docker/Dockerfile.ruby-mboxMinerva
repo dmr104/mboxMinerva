@@ -3,6 +3,8 @@
 # mboxMinerva CI/CD Container - Ruby 3.4.7 (Debian Trixie/Bookworm)
 # -----------------------------------------------------------------------------
 FROM docker.io/library/ruby:3.4.7-slim
+ARG GIT_COMMIT=unknown
+ENV GIT_COMMIT=${GIT_COMMIT}
 
 # 1. Install System Dependencies
 #    - git: Missing from slim, needed for gemspecs and git-crypt
@@ -14,6 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev \
     gnupg \
     libyaml-dev \
+    zlib1g-dev \
     libicu-dev \
     && rm -rf /var/lib/apt/lists/*
 

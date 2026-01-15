@@ -70,7 +70,7 @@ rebuild_ruby_base:
     - echo "Detected changes in build context. Rebuilding base image on Host..."
     # This 'docker build' actually runs on the HOST machine because of the socket mapping.
     # It updates the 'ruby:local-patched' tag in the host's storage.
-    - docker buildx build --load --pull -t ruby:local-patched -f docker/Dockerfile.ruby-mboxMinerva . 
+    - docker buildx build --build-arg GIT_COMMIT=$(git rev-parse HEAD) --load --pull -t ruby:local-patched -f docker/Dockerfile.ruby-mboxMinerva . 
     - echo "Have built ruby image from Dockerfile" 
     - docker tag ruby:local-patched "$CONTAINER_REGISTRY/$GH_USER_NAME"/ruby:"$TAG_IMMUTABLE" 
     - docker tag ruby:local-patched "$CONTAINER_REGISTRY/$GH_USER_NAME"/ruby:remote-patched
@@ -119,7 +119,7 @@ build_openbao_docker:
     - echo "Detected changes in build context. Rebuilding base image on Host..."
     # This 'docker build' actually runs on the HOST machine because of the socket mapping.
     # It updates the 'openbao-docker:local-patched' tag in the host's storage.
-    - docker buildx build --load --pull -t openbao-docker:local-patched -f docker/Dockerfile.openbao-docker . 
+    - docker buildx build --build-arg GIT_COMMIT=$(git rev-parse HEAD) --load --pull -t openbao-docker:local-patched -f docker/Dockerfile.openbao-docker . 
     - echo "Have built openbao-docker image from Dockerfile" 
     - docker tag openbao-docker:local-patched "$CONTAINER_REGISTRY/$GH_USER_NAME"/openbao-docker:"$TAG_IMMUTABLE" 
     - docker tag openbao-docker:local-patched "$CONTAINER_REGISTRY/$GH_USER_NAME"/openbao-docker:remote-patched
