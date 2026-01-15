@@ -222,6 +222,7 @@ While not retraining immediately upon every DSR request, we may receive several 
 
 **Business Value": "The validation set acts as our project's real-time steering mechanism and as an "early warning system" which allows us to optimize model performance and cease failing training runs early to save computation costs, all the while ensuring that the engine is probably actually learning to generalize before the final audit on the test set."
 
+---
 
 ### Tell me about our encrypted email Crypt/Vault?
 **Customer Language**: "The mapping between real identities and pseudonyms lives in an encrypted crypt stored on the backend of a CI (continuous integration) pipeline. Only authorized team members and CI/CD runners with the right key can decrypt it.  So it is access-controlled."

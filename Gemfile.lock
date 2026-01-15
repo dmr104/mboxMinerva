@@ -2,6 +2,7 @@ GEM
   remote: https://rubygems.org/
   specs:
     base64 (0.3.0)
+    charlock_holmes (0.7.9)
     csv (3.3.5)
     date (3.5.0)
     logger (1.7.0)
@@ -37,6 +38,7 @@ PLATFORMS
 
 DEPENDENCIES
   base64
+  charlock_holmes
   csv
   logger
   mail (~> 2.8)

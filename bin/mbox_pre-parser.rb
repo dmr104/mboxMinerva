@@ -62,6 +62,7 @@ require 'digest/sha256'
 require 'mail'
 require 'optparse'
 require 'date'
+require 'charlock_holmes'
 require 'fileutils'
 
 # -----------------------------------------------------------------------------
@@ -95,7 +96,7 @@ def parse_mbox(mbox_path)
   current_message = []
   in_message = false
 
-  File.open(mbox_path, 'r:UTF-8') do |file|
+  File.open(mbox_path, 'rb') do |file|
     file.each_line do |line|
       # mbox separator: lines starting with "From " (not "From:")
       if line.start_with?('From ') && !line.start_with?('From:')
@@ -190,6 +191,56 @@ def stamp_cohort_id(mail, mbox_path, override_cohort)
 end
 
 # -----------------------------------------------------------------------------
+# Charset Detection & Transcoding
+# -----------------------------------------------------------------------------
+
+# Extracts charset from Content-Type header, returns nil if not found
+def extract_charset(mail, part = nil)
+  begin
+    if part
+      return part.charset if part.charset && !part.charset.empty?
+    else
+      return mail.charset if mail.charset && !mail.charset.empty?
+    end
+  rescue => e
+    # Fall through to nil
+  end
+  nil
+end
+
+# Detects charset using charlock_holmes when Content-Type charset is missing
+def detect_charset(raw_bytes)
+  detection = CharlockHolmes::EncodingDetector.detect(raw_bytes)
+  detection[:encoding] if detection && detection[:encoding]
+rescue => e
+  nil
+end
+
+# Transcodes body to UTF-8 with charset detection and fallback
+# Priority: (1) explicit charset, (2) charlock_holmes detection, (3) safe replace
+def transcode_to_utf8(body_bytes, explicit_charset = nil)
+  return "" if body_bytes.nil? || body_bytes.empty?
+  
+  # Ensure we're working with raw bytes
+  body_bytes = body_bytes.dup.force_encoding('ASCII-8BIT')
+  
+  # Try explicit charset first
+  charset = explicit_charset
+  
+  # Auto-detect if no explicit charset
+  charset ||= detect_charset(body_bytes)
+  
+  # Fallback to UTF-8 assumption
+  charset ||= 'UTF-8'
+  
+  # Transcode with safe fallback for any remaining invalid sequences
+  body_bytes.force_encoding(charset).encode('UTF-8', invalid: :replace, undef: :replace, replace: '?')
+rescue Encoding::InvalidByteSequenceError, Encoding::UndefinedConversionError => e
+  # Nuclear fallback: force ASCII-8BIT interpretation with replacement
+  body_bytes.force_encoding('ASCII-8BIT').encode('UTF-8', invalid: :replace, undef: :replace, replace: '?')
+end
+
+# -----------------------------------------------------------------------------
 # Content Filtering
 # -----------------------------------------------------------------------------
 
@@ -234,19 +285,27 @@ end
 def extract_and_clean_body(mail, raw_email)
   begin
     body = if mail.multipart?
-             # For multipart, prefer text/plain part
-             text_part = mail.parts.find { |p| p.content_type&.start_with?('text/plain') }
-             text_part ? text_part.decoded.to_s : mail.parts.first&.decoded.to_s
-           else
-             mail.body.decoded.to_s
-           end
-    body ||= ""
-    strip_quoted_blocks(body)
+            # For multipart, prefer text/plain part with proper charset handling
+            text_part = mail.parts.find { |p| p.content_type&.start_with?('text/plain') }
+            if text_part
+              charset = extract_charset(mail, text_part)
+              transcode_to_utf8(text_part.decoded, charset)
+            else
+              first_part = mail.parts.first
+              charset = extract_charset(mail, first_part) if first_part
+              transcode_to_utf8(first_part&.decoded, charset)
+            end
+          else
+          charset = extract_charset(mail)
+          transcode_to_utf8(mail.body.decoded, charset)
+          end
+
+    strip_quoted_blocks(body || "")
   rescue => e
-    # Fallback: strip headers and clean raw content
+    # Fallback: strip headers and clean raw content with auto-detection
     header_end = raw_email.index("\n\n") || raw_email.index("\r\n\r\n")
     body = header_end ? raw_email[(header_end + 2)..-1] : raw_email
-    strip_quoted_blocks(body || "")
+    strip_quoted_blocks(transcode_to_utf8(body || ""))
   end
 end
 

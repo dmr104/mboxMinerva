@@ -14,6 +14,11 @@ variables:
   CONTAINER_REGISTRY: "ghcr.io"
   TAG_IMMUTABLE: $CI_COMMIT_SHORT_SHA
   DOCKER_TLS_CERTDIR: ""  # Disables TLS since we are talking to a local Unix socket
+  REPO_ROOT: "/home/dmr104/ruby_projects/mboxMinerva"
+  MBOX_DIR: "/home/dmr104/ruby_projects/Mail_mbox"
+  LOGS_DIR: "/home/dmr104/ruby_projects/minerva-cache/logs"
+  PRE_PARSED_DIR: "/home/dmr104/ruby_projects/minerva-cache/mbox_pre-parsed"
+  METADATA_DIR: "/home/dmr104/ruby_projects/minerva-cache/metadata"
 
 # The gitlab-runner will spin up separate job containers on the host using a podman executor, so we NEED an image 
 # for those job containers "openbao/openbao:latest" which by default will come from docker.io registry.
@@ -170,9 +175,11 @@ get_ruby_image_and_test:
   script:
     # (run multiple commands in same container)
     - |
-      docker run --rm -w /app "$PRIVATE_RUBY_GH_IMAGE" sh -c "
+      docker run --rm -v "$MBOX_DIR":/Mail_mbox:ro -v "$LOGS_DIR":/logs:rw -v "$PRE_PARSED_DIR":/mbox_pre-parsed -v "$REPO_ROOT":/app:ro -w /app/bin "$PRIVATE_RUBY_GH_IMAGE" sh -c "
         ruby -v
-        echo "Running tests in the custom container..."
+        echo \"Running tests in the custom container...\"
+        ruby mbox_pre-parser.rb /Mail_mbox/ntg-context.mbox --triage-file /logs/collisions.log --output-dir /mbox_pre-parsed
+        echo \"completed pre-parse of mbox...\"
       "
 
 .deploy_template:

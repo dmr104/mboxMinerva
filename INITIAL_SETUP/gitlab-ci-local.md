@@ -32,7 +32,12 @@ rebuild_ruby_base > * missing token
 If you have understood this, you will also understand that the variable as VAULT_TOKEN injected into th `gitlab-ci-local` command will not be fallen back upon, but overwritten.  So within our .gitlab-ci.yml file we shall set the variable VAULT_TOKEN only if VAULT_TOKEN is not already set.
 We do this in the following manner:
 ```yaml
-export VAULT_TOKEN=${VAULT_TOKEN:-$(bao write -field=token auth/jwt/login role=$VAULT_ROLE jwt=$BAO_VAULT_ID)}
+export VAULT_TOKEN="${VAULT_TOKEN:-$(bao write -field=token auth/jwt/login role=$VAULT_ROLE jwt=$BAO_VAULT_ID)}"
+```
+We also have had to set (in order that https://127.0.0.1:8200 won't return an http response):
+```yaml
+  variables:
+    BAO_ADDR: "http://192.168.1.168:8200" # Specfies the API address to the bao command 
 ```
 
 Note that we are using our root token here within development. There are other methods available though, like token auth or approle.  The first is the simplest where you can either use the root token directly (bad for prod), or create child tokens via `bao token -create -policy=mypolicy -ttl=1h`, or more commonly just consume tokens which have be *produced by* other auth methods (AppRole, JWT, etc).  For the latter, approle uses a role_id + secret_id pair where you'd first create an approle with `bao write auth/approle/role/local-dev policies=your-policy` to get a token.  You can fetch the role_id with `auth/approle/role/local-dev/role-id` and the secret_id with `auth/approle/role/local-dev/secret-id`.  You would obtain a token via `bao write auth/approle/login role_id=X secret_id=Y` and then use this token to subsequently obtain longer-term variables which are stored within openbao.
@@ -63,13 +68,13 @@ get_ruby_image_and_test:
     name: ${CONTAINER_REGISTRY}/${GH_USER_NAME}/openbao-docker:remote-patched
   extends: .secret_fetcher
 ```
-The reason why we cannot do this is because this image requires a github_PAT which is to be accessed by the .secret_fetcher.  If we try this it will result in a "Runner system failure", with an error message which unkindly dictates that the "job failed to pull image" and that it is "unable to retrieve the auth token" and that we are "unauthorised" with an "invalid username/password". Please note that this job may still run though if and when we invoke it through gitlab-ci-local because gitlab-ci-local may find the local cached image (see `podman images`) and skip the pull entirely, not to mention the possibility that your local docker/podman daemon may have already cached credentials from a previous `docker login ghcr.io` session in `~/.docker/config.json` on your Host machine. To guard against the possibility that gitlab-ci-local may find the local cached image amend your command of invocation to use the `--pull-policy always` option, to become:
+The reason why we cannot do this is because this image requires a github_PAT which is to be accessed by the .secret_fetcher.  If we try this it will result in a "Runner system failure", with an error message which unkindly dictates that the "job failed to pull image" and that it is "unable to retrieve the auth token" and that we are "unauthorised" with an "invalid username/password". Please note that this job may still run though if and when we invoke it through gitlab-ci-local because gitlab-ci-local may find the local cached image (see `podman images`) and skip the pull entirely, not to mention the possibility that your local docker/podman daemon may have already cached credentials from a previous `docker login ghcr.io` session in `~/.docker/config.json` on your Host machine. To guard against the possibility that gitlab-ci-local may find the local cached image, amend your command of invocation to use the `--pull-policy always` option, to become:
 ```
 npx gitlab-ci-local --network host --variable VAULT_TOKEN="$ROOT_TOKEN" --volume /run/user/1000/podman/podman.sock:/var/run/docker.sock --pull-policy always get_ruby_image_and_test
 ```
 This should help to assist towards avoiding false positives.
 
-Now to address the issue whereby the "openbao-docker:remote-patched" requires the github_PAT, and .secret_fetcher which acquires this PAT (personal access token) cannot access the access token until the image that requires it has been pulled.  We could adopt the classic DooD (Docker-out-of-Docker) bootstrap pattern. Recall that DooD means that we are mounting a host's `/run/user/1000/podman/podman.sock:` or `${XDG_RUNTIME_DIR}/podman/podman.sock` into the Job Container itself so that the Job can launch "sibling" Containers on the same host rather than trying to nest a full daemon inside itself. 
+Now to address the issue whereby the "openbao-docker:remote-patched" requires the github_PAT, and .secret_fetcher which acquires this PAT (personal access token) cannot access the access token until the image that requires it has been pulled.  We could adopt the classic DooD (Docker-out-of-Docker) bootstrap pattern. Recall that DooD means that we are mounting a host's `/run/user/1000/podman/podman.sock:` or `${XDG_RUNTIME_DIR}/podman/podman.sock:` into the Job Container itself so that the Job can launch "sibling" Containers on the same host rather than trying to nest a full daemon inside itself. 
 
 The bootstrap pattern we might use would be to start our Job with a public image that has docker CLI (command line interface) (like the image as `docker:cli`), and then use this docker CLI to pull the ***public*** (very important that it is public) image as "openbao-docker:remote-patched" which we will then use to do what is required to fetch the PAT (using the `.secret_fetcher` helper as "openbao-docker:remote-patched" has the `bao` command) and use this PAT to login to GHCR; and then finally pull the private ruby-based image for the actual work.  This is all done via the shared socket, requiring no `image:`-nesting.  
 
@@ -108,7 +113,7 @@ scratch_ruby_image_and_test:
     # 1. Login to OpenBao
     # We send the variable $BAO_VAULT_ID to OpenBao via id tokens: which is a signed JWT embedding with aud (audience).
     - echo "Vault role is $VAULT_ROLE"
-    - export VAULT_TOKEN=${VAULT_TOKEN:-$(docker run --rm -e VAULT_ADDR="$VAULT_ADDR" openbao/openbao bao write -field=token auth/jwt/login role=$VAULT_ROLE jwt="$BAO_VAULT_ID")}
+    - export VAULT_TOKEN="${VAULT_TOKEN:-$(docker run --rm -e VAULT_ADDR="$VAULT_ADDR" openbao/openbao bao write -field=token auth/jwt/login role=$VAULT_ROLE jwt="$BAO_VAULT_ID")}"
     - echo "I have the VAULT_TOKEN! It is $(echo "${VAULT_TOKEN}" | cut -c 1-5)xxx"
 
     # 2. Fetch the GHCR_PAT secret.
@@ -137,4 +142,218 @@ scratch_ruby_image_and_test:
         ruby -v
         echo "Running tests in the custom container..."
       "
+```
+-----
+
+# My .gitlab-ci.yml file so far looks like...
+```yml
+# .gitlab-ci.yml — mboxMinerva CI/CD Pipeline
+
+default:
+  tags: ["main"]
+
+stages:
+  - build_infra
+  - pull_infra_and_test
+  - app_test
+  - deploy
+
+variables:
+  GH_USER_NAME: "dmr104"
+  CONTAINER_REGISTRY: "ghcr.io"
+  TAG_IMMUTABLE: $CI_COMMIT_SHORT_SHA
+  DOCKER_TLS_CERTDIR: ""  # Disables TLS since we are talking to a local Unix socket
+
+# The gitlab-runner will spin up separate job containers on the host using a podman executor, so we NEED an image 
+# for those job containers "openbao/openbao:latest" which by default will come from docker.io registry.
+.secret_fetcher:
+  image: openbao/openbao:latest # Gives us the `bao` command
+  variables:
+    PATH_OF_SECRET: "github-creds"   # This must match the name of our secret with OpenBao's secret engine.
+    VAULT_ROLE: "gitlab-dev-runner-role" # See ./INITIAL_SETUP/Docker_image.md ### The OpenBao UI (The Wiring) #### D. Create the Role (The "Who is allowed" rule)
+    BAO_ADDR: "http://192.168.1.168:8200" # Specfies the API address to the bao command
+  id_tokens:
+    # This generates the JWT. 
+    BAO_VAULT_ID:
+      aud: "my-super-secure-app-id"  # The 'aud' MUST match OpenBao's 'bound-audiences'
+
+  script: 
+    - echo "Authentifying to OpenBao..."
+
+    # 1. Login to OpenBao
+    # We send the variable $BAO_VAULT_ID to OpenBao via id tokens: which is a signed JWT embedding with aud (audience).
+    - echo "Vault role is $VAULT_ROLE"
+    - export VAULT_TOKEN="${VAULT_TOKEN:-$(bao write -field=token auth/jwt/login role=$VAULT_ROLE jwt=$BAO_VAULT_ID)}"
+    - echo "I have the VAULT_TOKEN! It is $(echo "${VAULT_TOKEN}" | cut -c 1-5)xxx"
+
+    # 2. Fetch the GHCR_PAT secret.
+    - echo "Fetching secrets from ${PATH_OF_SECRET}"
+    - export GHCR_PAT=$(bao kv get -mount=secret/data -field=pat2 $PATH_OF_SECRET)
+    - echo "I have the secret! It is $(echo "${GHCR_PAT}" | cut -c 1-5)xxx"
+
+# JOB 1.1: A Builder
+# Usage: Builds the image ONLY if you touch the file 'docker/Dockerfile.ruby-mboxMinerva'
+rebuild_ruby_base:
+  extends: .secret_fetcher  # <--- Pulls in variables from .secret_fetcher
+  stage: build_infra
+    # Inherits the `openbao/openbao:latest` image from .secret_fetcher (so that `bao` auth tool is native). 
+  before_script: 
+    # Install the docker client utility on top of openbao (`apk add --no-cache docker-cli`), so that the image will be able to 
+    # talk to our /var/run/docker.sock (podman) in the GitLab Runner which is mapped to $XDG_RUNTIME_DIR"/podman/podman.sock in 
+    # the Host (see INITIAL_SETUP/Gitlab.sh)
+    - apk add --no-cache docker-cli docker-cli-buildx
+  script:
+    # Step 1: Run the inherited secret_fetcher script to get GHCR_PAT
+    - !reference [.secret_fetcher, script]  # <---  Pulls in script from .secret_fetcher
+
+    # Step 2. Clear the vault token (good hygiene)
+    - unset VAULT_TOKEN
+    - echo "I have the GHCR_PAT! It is $(echo "${GHCR_PAT}" | cut -c 1-5)xxx"
+
+    # Step 3. Build and tag
+    - echo "Detected changes in build context. Rebuilding base image on Host..."
+    # This 'docker build' actually runs on the HOST machine because of the socket mapping.
+    # It updates the 'ruby:local-patched' tag in the host's storage.
+    - docker buildx build --load --pull -t ruby:local-patched -f docker/Dockerfile.ruby-mboxMinerva . 
+    - echo "Have built ruby image from Dockerfile" 
+    - docker tag ruby:local-patched "$CONTAINER_REGISTRY/$GH_USER_NAME"/ruby:"$TAG_IMMUTABLE" 
+    - docker tag ruby:local-patched "$CONTAINER_REGISTRY/$GH_USER_NAME"/ruby:remote-patched
+
+    # Step 4. Auth and push to GHCR
+    - "echo \"Authentifying to ${CONTAINER_REGISTRY}\"" 
+    - echo "$GHCR_PAT" | docker login $CONTAINER_REGISTRY -u $GH_USER_NAME --password-stdin 
+    - "echo \"Authentified via docker to ${CONTAINER_REGISTRY}\"" 
+    - "echo \"Pushing ruby:local-patched to ${CONTAINER_REGISTRY}\"" 
+    - docker push "$CONTAINER_REGISTRY"/"$GH_USER_NAME"/ruby:"$TAG_IMMUTABLE" 
+    - docker push "$CONTAINER_REGISTRY"/"$GH_USER_NAME"/ruby:remote-patched 
+  rules:
+    # CONDITION: Only run if these files change in the commit/MR
+    # 1. If the Dockerfile changes, run automatically (on_success)
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      changes:
+        - docker/Dockerfile.ruby-mboxMinerva
+      when: on_success
+    # 2. FALLBACK: Allow manual triggering in the UI if you ever need to force a rebuild (e.g. clean host)
+    - when: manual                # <--- You must click "Play" in the UI.
+      allow_failure: true        # The pipeline continues running even if the manual job is not run
+
+# JOB 1.2: Another Builder
+# Usage: Builds the image ONLY if you touch the file 'docker/Dockerfile.openbao-docker'
+build_openbao_docker:
+  extends: .secret_fetcher  # <--- Pulls in variables from .secret_fetcher
+  stage: build_infra
+    # Inherits the `openbao/openbao:latest` image from .secret_fetcher (so that `bao` auth tool is native). 
+  before_script: 
+    # Install the docker client utility on top of openbao (`apk add --no-cache docker-cli`), so that the image will be able to 
+    # talk to our /var/run/docker.sock (podman) in the GitLab Runner which is mapped to $XDG_RUNTIME_DIR"/podman/podman.sock in 
+    # the Host (see INITIAL_SETUP/Gitlab.sh)
+    - apk add --no-cache docker-cli docker-cli-buildx
+    # We have hereby pre-installed the docker client utility on top of openbao (`apk add --no-cache docker-cli`), so that the image will 
+    # be able to talk to our /var/run/docker.sock (podman) in the GitLab Runner which is mapped to $XDG_RUNTIME_DIR"/podman/podman.sock 
+    # in the Host (see INITIAL_SETUP/Gitlab.sh)
+  script:
+    # Step 1: Run the inherited secret_fetcher script to get GHCR_PAT
+    - !reference [.secret_fetcher, script]  # <---  Pulls in script from .secret_fetcher
+
+    # Step 2. Clear the vault token (good hygiene)
+    - unset VAULT_TOKEN
+    - echo "I have the GHCR_PAT! It is $(echo "${GHCR_PAT}" | cut -c 1-5)xxx"
+
+    # Step 3. Build and tag
+    - echo "Detected changes in build context. Rebuilding base image on Host..."
+    # This 'docker build' actually runs on the HOST machine because of the socket mapping.
+    # It updates the 'openbao-docker:local-patched' tag in the host's storage.
+    - docker buildx build --load --pull -t openbao-docker:local-patched -f docker/Dockerfile.openbao-docker . 
+    - echo "Have built openbao-docker image from Dockerfile" 
+    - docker tag openbao-docker:local-patched "$CONTAINER_REGISTRY/$GH_USER_NAME"/openbao-docker:"$TAG_IMMUTABLE" 
+    - docker tag openbao-docker:local-patched "$CONTAINER_REGISTRY/$GH_USER_NAME"/openbao-docker:remote-patched
+
+    # Step 4. Auth and push to GHCR
+    - "echo \"Authentifying to ${CONTAINER_REGISTRY}\"" 
+    - echo "$GHCR_PAT" | docker login $CONTAINER_REGISTRY -u $GH_USER_NAME --password-stdin 
+    - "echo \"Authentified via docker to ${CONTAINER_REGISTRY}\"" 
+    - "echo \"Pushing openbao-docker:local-patched to ${CONTAINER_REGISTRY}\"" 
+    - docker push "$CONTAINER_REGISTRY"/"$GH_USER_NAME"/openbao-docker:"$TAG_IMMUTABLE" 
+    - docker push "$CONTAINER_REGISTRY"/"$GH_USER_NAME"/openbao-docker:remote-patched 
+  rules:
+    # CONDITION: Only run if these files change in the commit/MR
+    # 1. If the Dockerfile changes, run automatically (on_success)
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      changes:
+        - docker/Dockerfile.openbao-docker
+      when: on_success
+    # 2. FALLBACK: Allow manual triggering in the UI if you ever need to force a rebuild (e.g. clean host)
+    - when: manual                # <--- You must click "Play" in the UI.
+      allow_failure: true        # The pipeline continues running even if the manual job is not run
+
+# JOB 2: The Consumer
+# Usage: Runs your actual tests using the image from Job 1
+
+get_ruby_image_and_test:
+  extends: .secret_fetcher  # <--- Pulls in variables from .secret_fetcher
+  stage: pull_infra_and_test
+  image:
+    name: ${CONTAINER_REGISTRY}/${GH_USER_NAME}/openbao-docker:remote-patched 
+  variables:
+    PRIVATE_RUBY_GH_IMAGE: ${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:remote-patched
+  before_script:
+    # Run the inherited secret_fetcher script to get GHCR_PAT
+    - !reference [.secret_fetcher, script]  # <---  Pulls in script from .secret_fetcher
+
+    - echo "Authentifying to OpenBao..."
+
+    # Clear the vault token (good hygiene)
+    - unset VAULT_TOKEN
+    - echo "I have the GHCR_PAT! It is $(echo "${GHCR_PAT}" | cut -c 1-5)xxx"
+
+    # Authenticate to GHCR using the Vault-fetched PAT
+    # GHCR_PAT comes from .secret_fetcher
+    - "echo \"Authentifying to ${CONTAINER_REGISTRY}\""     
+    - echo "$GHCR_PAT" | docker login $CONTAINER_REGISTRY -u $GH_USER_NAME --password-stdin
+
+    - echo "${PRIVATE_RUBY_GH_IMAGE}"
+    - ls -la /var/run/docker.sock || echo "Socket missing!"
+    - id
+    # Pull your private image
+    - docker pull ${PRIVATE_RUBY_GH_IMAGE}
+  script:
+    # (run multiple commands in same container)
+    - |
+      docker run --rm -w /app "$PRIVATE_RUBY_GH_IMAGE" sh -c "
+        ruby -v
+        echo "Running tests in the custom container..."
+      "
+
+.deploy_template:
+  variables:
+    USE_TAG: "912ab15f"
+  image: "${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:${USE_TAG}"
+  script:
+    - echo "Deploying image ${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:${USE_TAG}"
+    - "echo \"Targeting environment: ${TARGET_ENV}\""
+    # - ./deploy_script.sh --env $TARGET_ENV --tag $CI_COMMIT_SHORT_SHA
+
+# DEV Job: Inherits logic, set ENV to 'staging', runs Automatically
+deploy_dev:
+  extends: .deploy_template
+  stage: deploy
+  variables:
+    TARGET_ENV: "staging"  # <--- The "Flag" is hardcoded here
+  environment:
+    name: staging
+    # url: https://dev.example.com
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+deploy_prod:
+  extends: .deploy_template
+  stage: deploy
+  variables:
+    TARGET_ENV: "production"  # <--- The "Flag" is hardcoded here
+  environment:
+    name: production
+    # url: https://example.com
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      when: manual  # <--- The safety gate
 ```
