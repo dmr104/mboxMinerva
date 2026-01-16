@@ -174,7 +174,7 @@ get_ruby_image_and_test:
     - docker pull ${PRIVATE_RUBY_GH_IMAGE}
   script:
     # (run multiple commands in same container)
-    - docker run --rm "$PRIVATE_RUBY_GH_IMAGE" bundle list
+    - docker run --rm "$PRIVATE_RUBY_GH_IMAGE" bundle config
     - |
       docker run --rm -v "$MBOX_DIR":/Mail_mbox:ro -v "$LOGS_DIR":/logs:rw -v "$PRE_PARSED_DIR":/mbox_pre-parsed -v "$REPO_ROOT":/mboxMinerva:ro -w /mboxMinerva/bin "$PRIVATE_RUBY_GH_IMAGE" sh -c "
         ruby -v
