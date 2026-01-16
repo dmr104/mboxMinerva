@@ -70,7 +70,7 @@ rebuild_ruby_base:
     - echo "Detected changes in build context. Rebuilding base image on Host..."
     # This 'docker build' actually runs on the HOST machine because of the socket mapping.
     # It updates the 'ruby:local-patched' tag in the host's storage.
-    - docker buildx build --build-arg GIT_COMMIT=$(git rev-parse HEAD) --load --pull -t ruby:local-patched -f docker/Dockerfile.ruby-mboxMinerva . 
+    - docker buildx build --no-cache --build-arg GIT_COMMIT=$(git rev-parse HEAD) --load --pull -t ruby:local-patched -f docker/Dockerfile.ruby-mboxMinerva . 
     - echo "Have built ruby image from Dockerfile" 
     - docker tag ruby:local-patched "$CONTAINER_REGISTRY/$GH_USER_NAME"/ruby:"$TAG_IMMUTABLE" 
     - docker tag ruby:local-patched "$CONTAINER_REGISTRY/$GH_USER_NAME"/ruby:remote-patched
@@ -173,7 +173,7 @@ get_ruby_image_and_test:
     # Pull your private image
     - docker pull ${PRIVATE_RUBY_GH_IMAGE}
   script:
-    - docker run --rm "$PRIVATE_RUBY_GH_IMAGE" bundle config
+    - docker run --rm "$PRIVATE_RUBY_GH_IMAGE" bundle list
     # (run multiple commands in same container)
     - docker run --rm -v "$MBOX_DIR":/Mail_mbox:ro -v "$LOGS_DIR":/logs:rw -v "$PRE_PARSED_DIR":/mbox_pre-parsed -v "$REPO_ROOT":/mboxMinerva:ro -w /mboxMinerva/bin "$PRIVATE_RUBY_GH_IMAGE" sh -c "
         ruby -v
