@@ -26,12 +26,18 @@ WORKDIR /mboxMinerva
 # 3. Dependency Layer Caching
 #    Copy only the dependency manifests first.
 #    This ensures 'bundle install' runs only when Gemfile changes, not code.
-COPY Gemfile Gemfile.lock .bundle ./
+COPY Gemfile Gemfile.lock ./
 
-# 4. Install Ruby Dependencies
+# 4. Specify the env var to override the mounted .bundle/config specified one.
+#    We have .bundle/ listed within .gitignore. Docker can't copy what is not committed to the repo. Same with respect to 
+#    `vendor/bundle`. So trying to `COPY Gemfile Gemfile.lock .bundle ./` is futile.
+#    At build time this directive doesn't change the default. But at runtime (which does), instead of the bind-mount bringing in 
+#    `.bundle/config` and bundler looking within an empty `vendor/bundle`, this env variable overrides the mounted `.bundle/config` and
+#    makes Bundler look where the gems actually are located within the container.  
+ENV BUNDLE_PATH=/usr/local/bundle
+
+# 5. Install Ruby Dependencies
 RUN bundle install
-
-# 5. Specify the env var to override the mounted .bundle/config specified one
 
 # 6. Runtime Configuration
 #    We DO NOT copy source code here (./lib, ./bin).
