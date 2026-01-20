@@ -21,7 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # 2. Prepare App Directory
-WORKDIR /mboxMinerva
+WORKDIR /MinervaApp
 
 # 3. Dependency Layer Caching
 #    Copy only the dependency manifests first.
