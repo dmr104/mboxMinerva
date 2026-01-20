@@ -21,7 +21,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libicu-dev \
     && rm -rf /var/lib/apt/lists/*
 
-ldconfig
 pkg-config --libs icu-i18n
 
 # 2. Prepare App Directory
