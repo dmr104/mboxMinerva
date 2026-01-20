@@ -22,8 +22,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 ENV BUNDLE_APP_CONFIG=/MinervaApp/mboxMinerva
-ENV BUNDLE_PATH=/MinervaApp/mboxMinerva/vendor/bundle
-ENV GEM_HOME=/MinervaApp/mboxMinerva
 
 # 2. Prepare App Directory
 WORKDIR /MinervaApp/mboxMinerva
@@ -31,7 +29,7 @@ WORKDIR /MinervaApp/mboxMinerva
 # 3. Dependency Layer Caching
 #    Copy only the dependency manifests first.
 #    This ensures 'bundle install' runs only when Gemfile changes, not code.
-COPY Gemfile Gemfile.lock .bundle ./mboxMinerva/
+COPY Gemfile Gemfile.lock .bundle ./
 
 # 4. Install Ruby Dependencies
 RUN bundle install
