@@ -21,16 +21,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libicu-dev \
     && rm -rf /var/lib/apt/lists/*
 
-RUN ldconfig
-RUN pkg-config --libs icu-i18n
-
 # 2. Prepare App Directory
-WORKDIR /mboxMinerva
+WORKDIR=/MinervaApp
 
 # 3. Dependency Layer Caching
 #    Copy only the dependency manifests first.
 #    This ensures 'bundle install' runs only when Gemfile changes, not code.
-COPY Gemfile Gemfile.lock .bundle ./
+COPY Gemfile Gemfile.lock .bundle ./mboxMinerva
 
 # 4. Install Ruby Dependencies
 RUN bundle install
