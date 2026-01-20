@@ -27,7 +27,7 @@ WORKDIR /MinervaApp
 # 3. Dependency Layer Caching
 #    Copy only the dependency manifests first.
 #    This ensures 'bundle install' runs only when Gemfile changes, not code.
-COPY Gemfile Gemfile.lock .bundle ./mboxMinerva
+COPY Gemfile Gemfile.lock .bundle ./mboxMinerva/
 
 # 4. Install Ruby Dependencies
 RUN bundle install
