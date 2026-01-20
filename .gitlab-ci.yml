@@ -177,6 +177,8 @@ get_ruby_image_and_test:
     - |
       docker run --rm -v "$MBOX_DIR":/Mail_mbox:ro -v "$LOGS_DIR":/logs:rw -v "$PRE_PARSED_DIR":/mbox_pre-parsed -v "$REPO_ROOT":/mboxMinerva:ro -w /mboxMinerva/bin "$PRIVATE_RUBY_GH_IMAGE" sh -c "
         bundle config
+        bundle config set path 'vendor/bundle'
+        bundle config
         bundle list
         ruby -v
         echo \"Running tests in the custom container...\"
