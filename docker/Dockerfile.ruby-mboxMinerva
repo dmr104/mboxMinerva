@@ -30,8 +30,8 @@ COPY Gemfile Gemfile.lock ./
 
 # 4. Specify the env var to override the default.
 #    At build time this directive doesn't change the default as /usr/local/bundle. But at runtime (which does), this
-#    makes Bundler look where the gems actually are located within the container at vendor/bundle.  
-ENV BUNDLE_PATH=vendor/bundle
+#    makes Bundler look where the gems actually are located within the container at vendor/bundle. 
+RUN bundle config set --local path 'vendor/bundle'
 
 # 5. Install Ruby Dependencies
 RUN bundle install
