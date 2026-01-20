@@ -178,7 +178,11 @@ get_ruby_image_and_test:
       docker run --rm -v "$MBOX_DIR":/Mail_mbox:ro -v "$LOGS_DIR":/logs:rw -v "$PRE_PARSED_DIR":/mbox_pre-parsed -v "$REPO_ROOT":/mboxMinerva:ro -w /mboxMinerva/bin "$PRIVATE_RUBY_GH_IMAGE" sh -c "
         bundle config
         bundle list
+       
+        cat /usr/local/bundle/extensions/x86_64-linux/3.4.0/charlock_holmes-0.7.9/mkmf.log
         ruby -v
+        ls -la /mboxMinerva
+        ls -la /mboxMinerva/vendor/bundle/ruby/3.3.0/gems
         echo \"Running tests in the custom container...\"
         ruby mbox_pre-parser.rb /Mail_mbox/ntg-context.mbox --triage-file /logs/collisions.log --output-dir /mbox_pre-parsed
         echo \"completed pre-parse of mbox...\"

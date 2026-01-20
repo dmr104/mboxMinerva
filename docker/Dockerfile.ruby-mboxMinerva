@@ -11,6 +11,7 @@ ENV GIT_COMMIT=${GIT_COMMIT}
 #    - build-essential: Needed for compiling pg and simhash native extensions
 #    - libpq-dev: Needed for pg header files
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config \
     git \
     build-essential \
     libpq-dev \
@@ -19,9 +20,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zlib1g-dev \
     libicu-dev \
     && rm -rf /var/lib/apt/lists/*
-
-ENV BUNDLE_APP_CONFIG=
-ENV BUNDLE_PATH=vendor/bundle
 
 # 2. Prepare App Directory
 WORKDIR /mboxMinerva
