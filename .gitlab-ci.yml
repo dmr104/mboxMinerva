@@ -73,7 +73,7 @@ rebuild_ruby_base:
     - docker buildx build --no-cache --progress=plain --build-arg GIT_COMMIT=$(git rev-parse HEAD) --load --pull -t ruby:local-patched -f docker/Dockerfile.ruby-mboxMinerva . 
     - echo "Have built ruby image from Dockerfile" 
     - docker tag ruby:local-patched "$CONTAINER_REGISTRY/$GH_USER_NAME"/ruby:"$TAG_IMMUTABLE" 
-    - docker tag ruby:local-patched "$CONTAINER_REGISTRY/$GH_USER_NAME"/ruby:remote-patched
+    - docker tag ruby:local-patched "$CONTAINER_REGISTRY/$GH_USER_NAME"/ruby:latest
 
     # Step 4. Auth and push to GHCR
     - "echo \"Authentifying to ${CONTAINER_REGISTRY}\"" 
@@ -81,7 +81,7 @@ rebuild_ruby_base:
     - "echo \"Authentified via docker to ${CONTAINER_REGISTRY}\"" 
     - "echo \"Pushing ruby:local-patched to ${CONTAINER_REGISTRY}\"" 
     - docker push "$CONTAINER_REGISTRY"/"$GH_USER_NAME"/ruby:"$TAG_IMMUTABLE" 
-    - docker push "$CONTAINER_REGISTRY"/"$GH_USER_NAME"/ruby:remote-patched 
+    - docker push "$CONTAINER_REGISTRY"/"$GH_USER_NAME"/ruby:latest 
   rules:
     # CONDITION: Only run if these files change in the commit/MR
     # 1. If the Dockerfile changes, run automatically (on_success)
@@ -151,7 +151,7 @@ get_ruby_image_and_test:
   image:
     name: ${CONTAINER_REGISTRY}/${GH_USER_NAME}/openbao-docker:remote-patched 
   variables:
-    PRIVATE_RUBY_GH_IMAGE: ${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:remote-patched
+    PRIVATE_RUBY_GH_IMAGE: ${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:latest
   before_script:
     # Run the inherited secret_fetcher script to get GHCR_PAT
     - !reference [.secret_fetcher, script]  # <---  Pulls in script from .secret_fetcher
@@ -172,6 +172,7 @@ get_ruby_image_and_test:
     - id
     # Pull your private image
     - docker pull ${PRIVATE_RUBY_GH_IMAGE}
+    - docker inspect --format='{{index .RepoDigests 0}}' ${PRIVATE_RUBY_GH_IMAGE}
   script:
     # (run multiple commands in same container)
     - |
