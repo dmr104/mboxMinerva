@@ -180,7 +180,7 @@ get_ruby_image_and_test:
         bundle list
         ruby -v
         echo \"Running tests in the custom container...\"
-        ruby mbox_pre-parser.rb /Mail_mbox/ntg-context.mbox --triage-file /logs/collisions.log --output-dir /mbox_pre-parsed
+        bundle exec ruby mbox_pre-parser.rb /Mail_mbox/ntg-context.mbox --triage-file /logs/collisions.log --output-dir /mbox_pre-parsed
         echo \"completed pre-parse of mbox...\"
       "
 

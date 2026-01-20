@@ -28,13 +28,10 @@ WORKDIR /MinervaApp
 #    This ensures 'bundle install' runs only when Gemfile changes, not code.
 COPY Gemfile Gemfile.lock ./
 
-# 4. Specify the env var to override the mounted .bundle/config specified one.
-#    We have .bundle/ listed within .gitignore. Docker can't copy what is not committed to the repo. Same with respect to 
-#    `vendor/bundle`. So trying to `COPY Gemfile Gemfile.lock .bundle ./` is futile.
-#    At build time this directive doesn't change the default. But at runtime (which does), instead of the bind-mount bringing in 
-#    `.bundle/config` and bundler looking within an empty `vendor/bundle`, this env variable overrides the mounted `.bundle/config` and
-#    makes Bundler look where the gems actually are located within the container.  
-ENV BUNDLE_PATH=/usr/local/bundle
+# 4. Specify the env var to override the default.
+#    At build time this directive doesn't change the default as /usr/local/bundle. But at runtime (which does), this
+#    makes Bundler look where the gems actually are located within the container at vendor/bundle.  
+ENV BUNDLE_PATH=vendor/bundle
 
 # 5. Install Ruby Dependencies
 RUN bundle install
