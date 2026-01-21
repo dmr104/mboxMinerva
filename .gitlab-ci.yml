@@ -70,16 +70,17 @@ rebuild_ruby_base:
     - echo "Detected changes in build context. Rebuilding base image on Host..."
     # This 'docker build' actually runs on the HOST machine because of the socket mapping.
     # It updates the 'ruby:local-patched' tag in the host's storage.
-    - docker buildx build --no-cache --progress=plain --build-arg GIT_COMMIT=$(git rev-parse HEAD) --load --pull -t ruby:local-patched -f docker/Dockerfile.ruby-mboxMinerva . 
+    - docker buildx prune -af
+    - docker buildx build --no-cache --progress=plain --build-arg GIT_COMMIT=$(git rev-parse HEAD) --load --pull -t my_ruby_build -f docker/Dockerfile.ruby-mboxMinerva . 
     - echo "Have built ruby image from Dockerfile" 
-    - docker tag ruby:local-patched "$CONTAINER_REGISTRY/$GH_USER_NAME"/ruby:"$TAG_IMMUTABLE" 
-    - docker tag ruby:local-patched "$CONTAINER_REGISTRY/$GH_USER_NAME"/ruby:latest
+    - docker tag ruby:excalibur_tag "$CONTAINER_REGISTRY/$GH_USER_NAME"/ruby:"$TAG_IMMUTABLE" 
+    - docker tag ruby:excalibur_latest "$CONTAINER_REGISTRY/$GH_USER_NAME"/ruby:latest
 
     # Step 4. Auth and push to GHCR
     - "echo \"Authentifying to ${CONTAINER_REGISTRY}\"" 
     - echo "$GHCR_PAT" | docker login $CONTAINER_REGISTRY -u $GH_USER_NAME --password-stdin 
     - "echo \"Authentified via docker to ${CONTAINER_REGISTRY}\"" 
-    - "echo \"Pushing ruby:local-patched to ${CONTAINER_REGISTRY}\"" 
+    - "echo \"Pushing my_ruby_build to ${CONTAINER_REGISTRY}\"" 
     - docker push "$CONTAINER_REGISTRY"/"$GH_USER_NAME"/ruby:"$TAG_IMMUTABLE" 
     - docker push "$CONTAINER_REGISTRY"/"$GH_USER_NAME"/ruby:latest 
   rules:
@@ -119,16 +120,16 @@ build_openbao_docker:
     - echo "Detected changes in build context. Rebuilding base image on Host..."
     # This 'docker build' actually runs on the HOST machine because of the socket mapping.
     # It updates the 'openbao-docker:local-patched' tag in the host's storage.
-    - docker buildx build --build-arg GIT_COMMIT=$(git rev-parse HEAD) --load --pull -t openbao-docker:local-patched -f docker/Dockerfile.openbao-docker . 
+    - docker buildx build --build-arg GIT_COMMIT=$(git rev-parse HEAD) --load --pull -t my_openbao_docker_build -f docker/Dockerfile.openbao-docker . 
     - echo "Have built openbao-docker image from Dockerfile" 
-    - docker tag openbao-docker:local-patched "$CONTAINER_REGISTRY/$GH_USER_NAME"/openbao-docker:"$TAG_IMMUTABLE" 
-    - docker tag openbao-docker:local-patched "$CONTAINER_REGISTRY/$GH_USER_NAME"/openbao-docker:remote-patched
+    - docker tag openbao-docker:excalibur_tag "$CONTAINER_REGISTRY/$GH_USER_NAME"/openbao-docker:"$TAG_IMMUTABLE" 
+    - docker tag openbao-docker:excalibur_latest "$CONTAINER_REGISTRY/$GH_USER_NAME"/openbao-docker:remote-patched
 
     # Step 4. Auth and push to GHCR
     - "echo \"Authentifying to ${CONTAINER_REGISTRY}\"" 
     - echo "$GHCR_PAT" | docker login $CONTAINER_REGISTRY -u $GH_USER_NAME --password-stdin 
     - "echo \"Authentified via docker to ${CONTAINER_REGISTRY}\"" 
-    - "echo \"Pushing openbao-docker:local-patched to ${CONTAINER_REGISTRY}\"" 
+    - "echo \"Pushing my_openbao_docker_build to ${CONTAINER_REGISTRY}\"" 
     - docker push "$CONTAINER_REGISTRY"/"$GH_USER_NAME"/openbao-docker:"$TAG_IMMUTABLE" 
     - docker push "$CONTAINER_REGISTRY"/"$GH_USER_NAME"/openbao-docker:remote-patched 
   rules:
@@ -178,7 +179,7 @@ get_ruby_image_and_test:
     # bundle install
     # cat /usr/local/bundle/extensions/x86_64-linux/3.4.0/charlock_holmes-0.7.9/mkmf.log
     # cat /usr/local/bundle/extensions/x86_64-linux/3.4.0/charlock_holmes-0.7.9/gem_make.out
-    - docker inspect ${PRIVATE_RUBY_GH_IMAGE}
+    - echo "${PRIVATE_RUBY_GH_IMAGE}"
     - |
       docker run --pull always --rm -v "$MBOX_DIR":/Mail_mbox:ro -v "$LOGS_DIR":/logs:rw -v "$PRE_PARSED_DIR":/mbox_pre-parsed -v "$REPO_ROOT":/mboxMinerva:ro -w /mboxMinerva/bin "$PRIVATE_RUBY_GH_IMAGE" sh -c "
         bundle list

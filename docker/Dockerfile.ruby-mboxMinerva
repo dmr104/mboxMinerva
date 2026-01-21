@@ -2,6 +2,8 @@
 # -----------------------------------------------------------------------------
 # mboxMinerva CI/CD Container - Ruby 3.4.8 (Debian Bookworm)
 # -----------------------------------------------------------------------------
+
+# The following licence applies to the copied code.
 #
 # Copyright (C) 2014 Docker, Inc. All rights reserved.
 
