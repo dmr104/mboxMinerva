@@ -6,6 +6,11 @@ FROM docker.io/library/ruby:3.4.7-slim
 ARG GIT_COMMIT=unknown
 ENV GIT_COMMIT=${GIT_COMMIT}
 
+ENTRYPOINT ["sh", "-c", "unset BUNDLE_APP_CONFIG GEM_HOME; exec \"$@\"", "--"]
+
+ENV BUNDLE_APP_CONFIG=.bundle
+ENV GEM_HOME=.bundle
+
 # 1. Install System Dependencies
 #    - git: Missing from slim, needed for gemspecs and git-crypt
 #    - build-essential: Needed for compiling pg and simhash native extensions
@@ -21,8 +26,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libicu-dev \
     && rm -rf /var/lib/apt/lists/*
 
-ENV BUNDLE_APP_CONFIG=.bundle
-ENV GEM_HOME=.bundle
 
 # 2. Prepare App Directory
 WORKDIR /MinervaApp/mboxMinerva
