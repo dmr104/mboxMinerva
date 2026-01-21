@@ -172,15 +172,15 @@ get_ruby_image_and_test:
     - id
     # Pull your private image
     - docker pull ${PRIVATE_RUBY_GH_IMAGE}
-    - docker inspect ${PRIVATE_RUBY_GH_IMAGE}
+    - docker image inspect ruby:latest
   script:
     # (run multiple commands in same container)
     # bundle install
     # cat /usr/local/bundle/extensions/x86_64-linux/3.4.0/charlock_holmes-0.7.9/mkmf.log
     # cat /usr/local/bundle/extensions/x86_64-linux/3.4.0/charlock_holmes-0.7.9/gem_make.out
+    - docker inspect ${PRIVATE_RUBY_GH_IMAGE}
     - |
       docker run --pull always --rm -v "$MBOX_DIR":/Mail_mbox:ro -v "$LOGS_DIR":/logs:rw -v "$PRE_PARSED_DIR":/mbox_pre-parsed -v "$REPO_ROOT":/mboxMinerva:ro -w /mboxMinerva/bin "$PRIVATE_RUBY_GH_IMAGE" sh -c "
-        bundle config
         bundle list
         bundle exec ruby -v
         ls -la /mboxMinerva
