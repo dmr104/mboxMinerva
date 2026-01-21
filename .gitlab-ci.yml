@@ -73,8 +73,8 @@ rebuild_ruby_base:
     - docker buildx prune -af
     - docker buildx build --no-cache --progress=plain --build-arg GIT_COMMIT=$(git rev-parse HEAD) --load --pull -t my_ruby_build -f docker/Dockerfile.ruby-mboxMinerva . 
     - echo "Have built ruby image from Dockerfile" 
-    - docker tag ruby:excalibur_tag "$CONTAINER_REGISTRY/$GH_USER_NAME"/ruby:"$TAG_IMMUTABLE" 
-    - docker tag ruby:excalibur_latest "$CONTAINER_REGISTRY/$GH_USER_NAME"/ruby:latest
+    - docker tag my_ruby_build "$CONTAINER_REGISTRY/$GH_USER_NAME"/ruby:"$TAG_IMMUTABLE" 
+    - docker tag my_ruby_build "$CONTAINER_REGISTRY/$GH_USER_NAME"/ruby:latest
 
     # Step 4. Auth and push to GHCR
     - "echo \"Authentifying to ${CONTAINER_REGISTRY}\"" 
@@ -122,8 +122,8 @@ build_openbao_docker:
     # It updates the 'openbao-docker:local-patched' tag in the host's storage.
     - docker buildx build --build-arg GIT_COMMIT=$(git rev-parse HEAD) --load --pull -t my_openbao_docker_build -f docker/Dockerfile.openbao-docker . 
     - echo "Have built openbao-docker image from Dockerfile" 
-    - docker tag openbao-docker:excalibur_tag "$CONTAINER_REGISTRY/$GH_USER_NAME"/openbao-docker:"$TAG_IMMUTABLE" 
-    - docker tag openbao-docker:excalibur_latest "$CONTAINER_REGISTRY/$GH_USER_NAME"/openbao-docker:remote-patched
+    - docker tag my_openbao_docker_build "$CONTAINER_REGISTRY/$GH_USER_NAME"/openbao-docker:"$TAG_IMMUTABLE" 
+    - docker tag my_openbao_docker_build "$CONTAINER_REGISTRY/$GH_USER_NAME"/openbao-docker:remote-patched
 
     # Step 4. Auth and push to GHCR
     - "echo \"Authentifying to ${CONTAINER_REGISTRY}\"" 
