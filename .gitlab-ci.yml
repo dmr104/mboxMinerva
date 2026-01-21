@@ -172,7 +172,7 @@ get_ruby_image_and_test:
     - id
     # Pull your private image
     - docker pull ${PRIVATE_RUBY_GH_IMAGE}
-    - docker image inspect ruby:latest
+    - docker image inspect ${PRIVATE_RUBY_GH_IMAGE}
   script:
     # (run multiple commands in same container)
     # bundle install

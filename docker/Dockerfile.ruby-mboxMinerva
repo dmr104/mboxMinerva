@@ -1,44 +1,192 @@
 # Dockerfile for mboxMinerva
 # -----------------------------------------------------------------------------
-# mboxMinerva CI/CD Container - Ruby 3.4.7 (Debian Trixie/Bookworm)
+# mboxMinerva CI/CD Container - Ruby 3.4.8 (Debian Bookworm)
 # -----------------------------------------------------------------------------
-FROM docker.io/library/ruby:3.4.7-slim
+#
+# Copyright (C) 2014 Docker, Inc. All rights reserved.
+
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions
+# are met:
+# 1. Redistributions of source code must retain the above copyright
+# notice, this list of conditions and the following disclaimer.
+# 2. Redistributions in binary form must reproduce the above copyright
+# notice, this list of conditions and the following disclaimer in the
+# documentation and/or other materials provided with the distribution.
+
+# THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+# ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+# FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+# DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+# OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+# HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+# LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+# OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+# SUCH DAMAGE.
+
+# The following code is copied from https://github.com/docker-library/ruby/blob/master/3.4/slim-bookworm/Dockerfile
+# When you see "# END OF COPIED CODE" the extract by which this code is copied from will have ended
+FROM debian:bookworm-slim
+
+RUN set -eux; \
+	apt-get update; \
+	apt-get install -y --no-install-recommends \
+		ca-certificates \
+	; \
+	rm -rf /var/lib/apt/lists/*
+
+# skip installing gem documentation with `gem install`/`gem update`
+RUN set -eux; \
+	mkdir -p /usr/local/etc; \
+	echo 'gem: --no-document' >> /usr/local/etc/gemrc
+
+ENV LANG C.UTF-8
+
+# https://www.ruby-lang.org/en/news/2025/12/17/ruby-3-4-8-released/
+ENV RUBY_VERSION 3.4.8
+ENV RUBY_DOWNLOAD_URL https://cache.ruby-lang.org/pub/ruby/3.4/ruby-3.4.8.tar.xz
+ENV RUBY_DOWNLOAD_SHA256 53a8ec71111449cbbd42224d8d27c493fa6ded228636731051c48604d4255d68
+
+# some of ruby's build scripts are written in ruby
+#   we purge system ruby later to make sure our final image uses what we just built
+RUN set -eux; \
+	\
+	savedAptMark="$(apt-mark showmanual)"; \
+	apt-get update; \
+	apt-get install -y --no-install-recommends \
+		dpkg-dev \
+		libgdbm-dev \
+		ruby \
+		autoconf \
+		bzip2 \
+		g++ \
+		gcc \
+		libbz2-dev \
+		libffi-dev \
+		libgdbm-compat-dev \
+		libglib2.0-dev \
+		libgmp-dev \
+		libncurses-dev \
+		libssl-dev \
+		libxml2-dev \
+		libxslt-dev \
+		libyaml-dev \
+		make \
+		wget \
+		xz-utils \
+		zlib1g-dev \
+	; \
+	\
+	rustArch=; \
+	dpkgArch="$(dpkg --print-architecture)"; \
+	case "$dpkgArch" in \
+		'amd64') rustArch='x86_64-unknown-linux-gnu'; rustupUrl='https://static.rust-lang.org/rustup/archive/1.28.2/x86_64-unknown-linux-gnu/rustup-init'; rustupSha256='20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c' ;; \
+		'arm64') rustArch='aarch64-unknown-linux-gnu'; rustupUrl='https://static.rust-lang.org/rustup/archive/1.28.2/aarch64-unknown-linux-gnu/rustup-init'; rustupSha256='e3853c5a252fca15252d07cb23a1bdd9377a8c6f3efa01531109281ae47f841c' ;; \
+	esac; \
+	\
+	if [ -n "$rustArch" ]; then \
+		mkdir -p /tmp/rust; \
+		\
+		wget -O /tmp/rust/rustup-init "$rustupUrl"; \
+		echo "$rustupSha256 */tmp/rust/rustup-init" | sha256sum --check --strict; \
+		chmod +x /tmp/rust/rustup-init; \
+		\
+		export RUSTUP_HOME='/tmp/rust/rustup' CARGO_HOME='/tmp/rust/cargo'; \
+		export PATH="$CARGO_HOME/bin:$PATH"; \
+		/tmp/rust/rustup-init -y --no-modify-path --profile minimal --default-toolchain '1.91.1' --default-host "$rustArch"; \
+		\
+		rustc --version; \
+		cargo --version; \
+	fi; \
+	\
+	wget -O ruby.tar.xz "$RUBY_DOWNLOAD_URL"; \
+	echo "$RUBY_DOWNLOAD_SHA256 *ruby.tar.xz" | sha256sum --check --strict; \
+	\
+	mkdir -p /usr/src/ruby; \
+	tar -xJf ruby.tar.xz -C /usr/src/ruby --strip-components=1; \
+	rm ruby.tar.xz; \
+	\
+	cd /usr/src/ruby; \
+	\
+	autoconf; \
+	gnuArch="$(dpkg-architecture --query DEB_BUILD_GNU_TYPE)"; \
+	./configure \
+		--build="$gnuArch" \
+		--disable-install-doc \
+		--enable-shared \
+		${rustArch:+--enable-yjit} \
+	; \
+	make -j "$(nproc)"; \
+	make install; \
+	\
+	rm -rf /tmp/rust; \
+	apt-mark auto '.*' > /dev/null; \
+	apt-mark manual $savedAptMark > /dev/null; \
+	find /usr/local -type f -executable -not \( -name '*tkinter*' \) -exec ldd '{}' ';' \
+		| awk '/=>/ { so = $(NF-1); if (index(so, "/usr/local/") == 1) { next }; gsub("^/(usr/)?", "", so); printf "*%s\n", so }' \
+		| sort -u \
+		| xargs -r dpkg-query --search \
+# https://manpages.debian.org/bookworm/dpkg/dpkg-query.1.en.html#S (we ignore diversions and it'll be really unusual for more than one package to provide any given .so file)
+		| awk 'sub(":$", "", $1) { print $1 }' \
+		| sort -u \
+		| xargs -r apt-mark manual \
+	; \
+	apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false; \
+	rm -rf /var/lib/apt/lists/*; \
+	\
+	cd /; \
+	rm -r /usr/src/ruby; \
+# verify we have no "ruby" packages installed
+	if dpkg -l | grep -i ruby; then exit 1; fi; \
+	[ "$(command -v ruby)" = '/usr/local/bin/ruby' ]; \
+# rough smoke test
+	ruby --version; \
+	gem --version; \
+	bundle --version
+
+# END OF COPIED CODE
+
+### The following code is for mboxMinerva
+
 ARG GIT_COMMIT=unknown
 ENV GIT_COMMIT=${GIT_COMMIT}
-
-ENTRYPOINT ["sh", "-c", "unset BUNDLE_APP_CONFIG GEM_HOME; exec \"$@\"", "--"]
-
-ENV BUNDLE_APP_CONFIG=.bundle
-ENV GEM_HOME=.bundle
 
 # 1. Install System Dependencies
 #    - git: Missing from slim, needed for gemspecs and git-crypt
 #    - build-essential: Needed for compiling pg and simhash native extensions
 #    - libpq-dev: Needed for pg header files
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config \
     git \
     build-essential \
+    libicu-dev \
     libpq-dev \
     gnupg \
     libyaml-dev \
+    pkg-config \
     zlib1g-dev \
-    libicu-dev \
     && rm -rf /var/lib/apt/lists/*
 
-
 # 2. Prepare App Directory
-WORKDIR /MinervaApp/mboxMinerva
+WORKDIR /mboxMinerva
 
-# 3. Dependency Layer Caching
+# 3. Set Environment variables
+# Environment variables beat .bundle/config in Bundler's priority order.
+# BUNDLE_PATH takes precedence over the .bundle/config file
+ENV BUNDLE_PATH=/bundle
+# We also want ruby's runtime within the Container to only look there/
+ENV GEM_PATH=/bundle
+
+# 4. Dependency Layer Caching
 #    Copy only the dependency manifests first.
 #    This ensures 'bundle install' runs only when Gemfile changes, not code.
-COPY Gemfile Gemfile.lock .bundle ./
+COPY Gemfile Gemfile.lock ./
 
-# 4. Install Ruby Dependencies
+# 5. Install Ruby Dependencies
 RUN bundle install
 
-# 5. Runtime Configuration
+# 6. Runtime Configuration
 #    We DO NOT copy source code here (./lib, ./bin).
 #    It is bind-mounted at runtime on the gitlab-runner: podman run -v /home/dmr104/ruby_projects/mboxMinerva:/mboxMinerva ...
 CMD ["/bin/bash"]
