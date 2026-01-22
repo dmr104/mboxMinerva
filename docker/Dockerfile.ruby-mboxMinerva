@@ -179,10 +179,11 @@ WORKDIR /mboxMinerva
 ENV BUNDLE_PATH=/bundle
 # We also want ruby's runtime within the Container to only look there/
 ENV GEM_PATH=/bundle
+# We want the config file within the .bungle directory within our mboxMinerva repo to specify the path as /bundle so 
+# that the Container will find its gems
+ENV BUNDLE_APP_CONFIG=/mboxMinerva/.bungle
 
 # 4. Dependency Layer Caching
-#    Copy only the dependency manifests first.
-#    This ensures 'bundle install' runs only when Gemfile changes, not code.
 COPY Gemfile Gemfile.lock ./
 
 # 5. Install Ruby Dependencies

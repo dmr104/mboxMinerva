@@ -120,6 +120,7 @@ build_openbao_docker:
     - echo "Detected changes in build context. Rebuilding base image on Host..."
     # This 'docker build' actually runs on the HOST machine because of the socket mapping.
     # It updates the 'openbao-docker:local-patched' tag in the host's storage.
+    - docker buildx prune -af
     - docker buildx build --build-arg GIT_COMMIT=$(git rev-parse HEAD) --load --pull -t my_openbao_docker_build -f docker/Dockerfile.openbao-docker . 
     - echo "Have built openbao-docker image from Dockerfile" 
     - docker tag my_openbao_docker_build "$CONTAINER_REGISTRY/$GH_USER_NAME"/openbao-docker:"$TAG_IMMUTABLE" 
@@ -176,16 +177,12 @@ get_ruby_image_and_test:
     - docker image inspect ${PRIVATE_RUBY_GH_IMAGE}
   script:
     # (run multiple commands in same container)
-    # bundle install
-    # cat /usr/local/bundle/extensions/x86_64-linux/3.4.0/charlock_holmes-0.7.9/mkmf.log
-    # cat /usr/local/bundle/extensions/x86_64-linux/3.4.0/charlock_holmes-0.7.9/gem_make.out
     - echo "${PRIVATE_RUBY_GH_IMAGE}"
     - |
       docker run --pull always --rm -v "$MBOX_DIR":/Mail_mbox:ro -v "$LOGS_DIR":/logs:rw -v "$PRE_PARSED_DIR":/mbox_pre-parsed -v "$REPO_ROOT":/mboxMinerva:ro -w /mboxMinerva/bin "$PRIVATE_RUBY_GH_IMAGE" sh -c "
+        bundle config
         bundle list
         bundle exec ruby -v
-        ls -la /mboxMinerva
-        ls -la /mboxMinerva/vendor/bundle/ruby/3.3.0/gems
         echo \"Running tests in the custom container...\"
         bundle exec ruby mbox_pre-parser.rb /Mail_mbox/ntg-context.mbox --triage-file /logs/collisions.log --output-dir /mbox_pre-parsed
         echo \"completed pre-parse of mbox...\"
