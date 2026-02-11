@@ -87,65 +87,7 @@ Just use a ***public*** image of our specially baked "openbao-docker".
 
 In your GitHub profile or organizations **Packages** tab, click your image name, then **Package Settings** at the bottom right, and scroll down to the "Danger Zone" to hit "Change visibility" and make it public. In GHCR this now **public** package (docker container image) will now allow anonymous access and can be pulled without authentifying or signing in via the CLI. Under "Manage Actions access" I selected "write" as I want my github user account to be able to upload and download this package and read and write its metadata, but I don't really need my user to be able to grant read, write, or admin roles to other users for that "openbao-docker" container package.
 
-## The following is a way to avoid using public containers at all 
-The following is a bit ugly but it does work.  It is a way to implement a nested "openbao" within docker:cli in order to grab the credentials and pull our ***private*** ruby image. 
-
-```yaml
-scratch_ruby_image_and_test:
-  stage: pull_infra_and_test
-  image:
-    name: docker:cli
-  variables:
-    VAULT_ADDR: "http://192.168.1.168:8200"
-    PRIVATE_RUBY_GH_IMAGE: ${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:remote-patched
-    PATH_OF_SECRET: "github-creds"   # This must match the name of our secret with OpenBao's secret engine.
-    VAULT_ROLE: "gitlab-dev-runner-role" # See ./INITIAL_SETUP/Docker_image.md ### The OpenBao UI (The Wiring) #### D. Create the Role (The "Who is allowed" rule)
-  id_tokens:
-    # This generates the JWT. 
-    BAO_VAULT_ID:
-      aud: "my-super-secure-app-id"  # The 'aud' MUST match OpenBao's 'bound-audiences'
-
-  before_script:
-    - docker pull openbao/openbao
-
-    - echo "Authentifying to OpenBao..."
-
-    # 1. Login to OpenBao
-    # We send the variable $BAO_VAULT_ID to OpenBao via id tokens: which is a signed JWT embedding with aud (audience).
-    - echo "Vault role is $VAULT_ROLE"
-    - export VAULT_TOKEN="${VAULT_TOKEN:-$(docker run --rm -e VAULT_ADDR="$VAULT_ADDR" openbao/openbao bao write -field=token auth/jwt/login role=$VAULT_ROLE jwt="$BAO_VAULT_ID")}"
-    - echo "I have the VAULT_TOKEN! It is $(echo "${VAULT_TOKEN}" | cut -c 1-5)xxx"
-
-    # 2. Fetch the GHCR_PAT secret.
-    - echo "Fetching secrets from ${PATH_OF_SECRET}"
-    - export GHCR_PAT=$(docker run --rm -e VAULT_ADDR="$VAULT_ADDR" -e VAULT_TOKEN="$VAULT_TOKEN" openbao/openbao bao kv get -mount=secret/data -field=pat2 $PATH_OF_SECRET)
-    - echo "I have the secret! It is $(echo "${GHCR_PAT}" | cut -c 1-5)xxx"
-
-    # Clear the vault token (good hygiene)
-    - unset VAULT_TOKEN
-    - echo "I have the GHCR_PAT! It is $(echo "${GHCR_PAT}" | cut -c 1-5)xxx"
-
-    # Authenticate to GHCR using the Vault-fetched PAT
-    # GHCR_PAT comes from .secret_fetcher
-    - "echo \"Authentifying to ${CONTAINER_REGISTRY}\""     
-    - echo "$GHCR_PAT" | docker login $CONTAINER_REGISTRY -u $GH_USER_NAME --password-stdin
-
-    - echo "${PRIVATE_RUBY_GH_IMAGE}"
-    - ls -la /var/run/docker.sock || echo "Socket missing!"
-    - id
-    # Pull your private image
-    - docker pull ${PRIVATE_RUBY_GH_IMAGE}
-  script:
-    # (run multiple commands in same container)
-    - |
-      docker run --rm -w /app "$PRIVATE_RUBY_GH_IMAGE" sh -c "
-        ruby -v
-        echo "Running tests in the custom container..."
-      "
-```
------
-
-# My .gitlab-ci.yml file so far looks like...
+My .gitlab-ci.yml file so far looks like...
 ```yml
 # .gitlab-ci.yml — mboxMinerva CI/CD Pipeline
 
@@ -357,3 +299,62 @@ deploy_prod:
     - if: $CI_COMMIT_BRANCH == "main"
       when: manual  # <--- The safety gate
 ```
+----
+
+## The following is a way to avoid using public containers at all 
+The following is a bit ugly but it does work.  It is a way to implement a nested "openbao" within docker:cli in order to grab the credentials and pull our ***private*** ruby image. I include it for completeness to show you what is possible, not to recommend that you actually do this unless you have a specific use case for doing so.
+
+```yaml
+scratch_ruby_image_and_test:
+  stage: pull_infra_and_test
+  image:
+    name: docker:cli
+  variables:
+    VAULT_ADDR: "http://192.168.1.168:8200"
+    PRIVATE_RUBY_GH_IMAGE: ${CONTAINER_REGISTRY}/${GH_USER_NAME}/ruby:remote-patched
+    PATH_OF_SECRET: "github-creds"   # This must match the name of our secret with OpenBao's secret engine.
+    VAULT_ROLE: "gitlab-dev-runner-role" # See ./INITIAL_SETUP/Docker_image.md ### The OpenBao UI (The Wiring) #### D. Create the Role (The "Who is allowed" rule)
+  id_tokens:
+    # This generates the JWT. 
+    BAO_VAULT_ID:
+      aud: "my-super-secure-app-id"  # The 'aud' MUST match OpenBao's 'bound-audiences'
+
+  before_script:
+    - docker pull openbao/openbao
+
+    - echo "Authentifying to OpenBao..."
+
+    # 1. Login to OpenBao
+    # We send the variable $BAO_VAULT_ID to OpenBao via id tokens: which is a signed JWT embedding with aud (audience).
+    - echo "Vault role is $VAULT_ROLE"
+    - export VAULT_TOKEN="${VAULT_TOKEN:-$(docker run --rm -e VAULT_ADDR="$VAULT_ADDR" openbao/openbao bao write -field=token auth/jwt/login role=$VAULT_ROLE jwt="$BAO_VAULT_ID")}"
+    - echo "I have the VAULT_TOKEN! It is $(echo "${VAULT_TOKEN}" | cut -c 1-5)xxx"
+
+    # 2. Fetch the GHCR_PAT secret.
+    - echo "Fetching secrets from ${PATH_OF_SECRET}"
+    - export GHCR_PAT=$(docker run --rm -e VAULT_ADDR="$VAULT_ADDR" -e VAULT_TOKEN="$VAULT_TOKEN" openbao/openbao bao kv get -mount=secret/data -field=pat2 $PATH_OF_SECRET)
+    - echo "I have the secret! It is $(echo "${GHCR_PAT}" | cut -c 1-5)xxx"
+
+    # Clear the vault token (good hygiene)
+    - unset VAULT_TOKEN
+    - echo "I have the GHCR_PAT! It is $(echo "${GHCR_PAT}" | cut -c 1-5)xxx"
+
+    # Authenticate to GHCR using the Vault-fetched PAT
+    # GHCR_PAT comes from .secret_fetcher
+    - "echo \"Authentifying to ${CONTAINER_REGISTRY}\""     
+    - echo "$GHCR_PAT" | docker login $CONTAINER_REGISTRY -u $GH_USER_NAME --password-stdin
+
+    - echo "${PRIVATE_RUBY_GH_IMAGE}"
+    - ls -la /var/run/docker.sock || echo "Socket missing!"
+    - id
+    # Pull your private image
+    - docker pull ${PRIVATE_RUBY_GH_IMAGE}
+  script:
+    # (run multiple commands in same container)
+    - |
+      docker run --rm -w /app "$PRIVATE_RUBY_GH_IMAGE" sh -c "
+        ruby -v
+        echo "Running tests in the custom container..."
+      "
+```
+-----

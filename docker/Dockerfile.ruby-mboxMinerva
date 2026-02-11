@@ -174,16 +174,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /mboxMinerva
 
 # 3. Set Environment variables
-# Environment variables beat .bundle/config in Bundler's priority order.
-# BUNDLE_PATH takes precedence over the .bundle/config file
 ENV BUNDLE_PATH=/bundle
+
 # We also want ruby's runtime within the Container to only look there/
 ENV GEM_PATH=/bundle
+
 # We want the config file within the .bungle directory within our mboxMinerva repo to specify the path as /bundle so 
 # that the Container will find its gems
 ENV BUNDLE_APP_CONFIG=/mboxMinerva/.bungle
 
 # 4. Dependency Layer Caching
+# We are copying from the Host to /mboxMinerva here
 COPY Gemfile Gemfile.lock ./
 
 # 5. Install Ruby Dependencies

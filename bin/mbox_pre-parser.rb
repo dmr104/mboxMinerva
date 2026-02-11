@@ -31,6 +31,7 @@
 #       "original_message_id":  "<abc@example>",   # Raw Message-ID for threading lookups
 #       "thread_id":            "<root@example>",  # Thread root ID or synthetic hash
 #       "cohort_id":            "2025-01",         # YYYY-MM cohort stamp
+#       "received":             "2025-01-15T09:30:00Z",  # ISO 8601 timestamp for sorting
 #       "email_message":        "cleaned body..."  # Processed email body (quotes stripped)
 #     }
 #
@@ -188,6 +189,37 @@ def stamp_cohort_id(mail, mbox_path, override_cohort)
   end
 
   File.mtime(mbox_path).strftime('%Y-%m')
+end
+
+# -----------------------------------------------------------------------------
+# Received Timestamp Extraction
+# -----------------------------------------------------------------------------
+
+# Extracts a sortable ISO 8601 timestamp from email headers
+# Priority: (1) Date header, (2) first Received header timestamp, (3) file mtime
+def extract_received_timestamp(mail, mbox_path)
+  # Priority 1: Date header (most reliable for actual send time)
+  begin
+    return mail.date.utc.iso8601 if mail.date
+  rescue => e
+    # Fall through
+  end
+
+  # Priority 2: Parse timestamp from first Received header
+  begin
+    if mail[:received]
+      received_header = mail[:received].is_a?(Array) ? mail[:received].last : mail[:received]
+      if received_header && (match = received_header.to_s.match(/;\s*(.+)$/))
+        parsed_date = DateTime.parse(match[1].strip)
+        return parsed_date.to_time.utc.iso8601
+      end
+    end
+  rescue => e
+    # Fall through
+  end
+
+  # Fallback: File modification time
+  File.mtime(mbox_path).utc.iso8601
 end
 
 # -----------------------------------------------------------------------------
@@ -593,10 +625,12 @@ raw_messages.each_with_index do |raw_email, idx|
   # Derive threading and cohort
   thread_id = derive_thread_id(mail, message_id)
   cohort_id = stamp_cohort_id(mail, mbox_path, options[:cohort])
+  received_ts = extract_received_timestamp(mail, mbox_path)
 
   json_output << {
     "internal_id" => internal_id,
     "original_message_id" => message_id,
+    "received" => received_ts,
     "thread_id" => thread_id,
     "cohort_id" => cohort_id,
     "email_message" => cleaned_body
