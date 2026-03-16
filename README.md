@@ -207,16 +207,16 @@ end
 ## Troubleshooting
 
 **Q: I changed the seed and now my splits are different!**  
-A: Don't do that. The seed is part of the experiment signature. Changing it invalidates reproducibility.
+A: Don't do that. Changing it invalidates reproducibility.
 
 **Q: Can I manually move an ID from train to test?**  
-A: You *can* edit `assignments.json`, but you're breaking immutability. Only do this if you have a very good reason (e.g., discovered PII in test set).
+A: You *can* edit `assignments.json`, but if you do so, you're breaking immutability, and destroying your record of what has happened. You ought not to do this.
 
 **Q: What if I delete old emails from the archive?**  
-A: The manifest retains their assignments. If you re-materialize, those IDs won't appear in the output (no source data), but the manifest preserves history.
+A: The manifest retains their assignments. If you re-materialize after tombstoning a particular user, those IDs corresponding to that user should not appear in the output (no source data) metadata files (train.jsonl, val.jsonl, and test.jsonl), but the manifest (assignments.json) preserves history.
 
-**Q: How do I reset everything and start fresh?**  
-A: Delete `assignments.json` and re-run with a new seed. All assignments will be recomputed.
+**Q: How do I reset my manifest everything and start afresh?**  
+A: Rename the `assignments.json` manifest file to preserve its record, and re-run `bin/mbox_pre-parser.rb` with a new seed. Then rematerialise by using `bin/splitter.rb`. All assignments will be recomputed.  Though be careful.  Your renamed manifest file will attest your history.  You should ask why are you doing this?  It does not seem like an appropriate way to work.
 
 ---
 
