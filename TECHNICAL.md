@@ -5,34 +5,58 @@ TO DO. remove --cohort option from "bin/splitter.rb"
 ## The overall architecture.
 * We want to keep a record of what mboxes we have put in to our pipeline, and only process the newer ones.
 * We want what we have put in to our pipeline to sit apart from what is processed within this pipeline, further down the line.  This "mboxes committed section" may be subject to regular backups. Not only do we want our raw mboxes and a record of them to be located here, but we also wish for a generic record of what DSRs have been made (though not fine-grained upon every email) to be recorded also.
-
+```txt
++----------------------------+
+|   mboxes admitted section  |
++----------------------------+
+            |
+            v
 +----------------------------+
 |   mboxes committed section |
 +----------------------------+
             |
             v
 +----------------------------+
-|   pre-processed shard files |
+|   spotchecking to triage   |
 +----------------------------+
-       |         |         |
-       v         v         v
-+-----+  +------+  +------+------------------+
-| RAG |  |  KG  |  | assignments.jsonl      |
-+-----+  +------+  | (immutable append-only)|
-                    +------------------------+
-                             |
-                             v
-                    +------------------------+
-                    |   pre-LoRA training    |
-                    +------------------------+
-                             |
-                             v
-                    +------------------------+
-                    |    LoRA training       |
-                    +------------------------+
+            |
+            v 
++----------------------------+
+| manual exclusions and DSRs |
++----------------------------+
+            |
+            v                       
++----------------------------+
+|  pre-processed shard files |
++----------------------------+
+|                  |  |      |
+|        +---------+  |      |
+|        | windows |  |      ╚----╗
+|        +---------+  |            |
+|                  |  |            |
+v                  v  v            v
++--------+  +------+  +------+     +------+------------------+
+| Vector |  |  KG  |  | BM25 |     | assignments.jsonl       |
++--------+  +------+  +------+     | (immutable append-only) |
+                                   +------------------------+
+                                   |
+                                   +------------+
+                                   | Pool files |
+                                   +------------+     
+                                   |
+                                   v
+                                   +------------------------+
+                                   |   pre-LoRA training    |
+                                   +------------------------+
+                                   |
+                                   v
+                                   +------------------------+
+                                   |    LoRA training       |
+                                   +------------------------+
+```
 
 ## What are the "shard" files?
-The shard files output from "bin/mbox_pre-parser.rb" are JSONL files, where each row is a single JSON object containing keys like: `mbox_processed_at, mbox_path, mime_version, content_type_outer, char_set_outer, thread_id, from, to, cc, reply_to_email_address, reply_to_this_email_address_instead, in_reply_to_message_id, each_in_reply_to_message_id_resolved, references_as_message_ids, each_of_references_resolved, subject, timestamp, has_attachments, attachments, original_message_id, email_body, and internal_id`. The values of all these metadata keys (key-value pairs) have the type of value as string, with the exception of "has_attachments", "each_in_reply_to_resolved", "each_of_references_resolved",  which are Boolean values, and "attachments", which is an array containining the metadata pertaining to each of the attachments within this email, which are stored externally with a filename and with a unique_attachment_id.  
+The shard files output from "bin/mbox_pre-parser.rb" are JSONL files, where each row is a single JSON object containing keys like: `mbox_processed_at, mbox_path, mbox_sha256, mime_version, content_type_outer, char_set_outer, thread_id, from, to, cc, reply_to_email_address, reply_to_this_email_address_instead, references_as_message_ids, each_of_references_resolved, in_reply_to_message_id, each_in_reply_to_message_id_resolved, subject, alleged_timestamp_sent, timestamp_received, has_attachments, attachments, original_message_id, message_body, and internal_id`. The values of all these metadata keys (key-value pairs) have the type of value as string, with the exception of "has_attachments", "each_in_reply_to_resolved", "each_of_references_resolved", which are Boolean values, and "attachments" : which is an array containing the metadata pertaining to each of the attachments within this email, which are stored externally with a filename and with a unique_attachment_id.  
 
 Of course, filename collisions can occur on the backend storage. We solve this problem by using the `unique_attachment_id` as the storage path, not the filename. Let us just say that `unique_attachment_id` has the value as "att-abc-123".  We can store the file as `/attachments/att-abc-123`.  Now if two emails have an attachment named `report.pdf`, the different ids lead to different paths, and no collision.  The `unique_attachment_id`  is your filesystem key ; the filename is just metadata you display back to the user.  
 
@@ -43,7 +67,7 @@ Every leaf in the MIME tree is a "part". An "attachment" is a specific kind of p
 The default within RFC2183 is inline for text parts, which is how an email client renders those as the message body without prompting for a download. Only the `attachment` disposition triggers the "save file" behaviour. 
 
 ### To explain the field as "in_reply_to_resolved"
-"in_reply_to" is a raw header : it holds Message-IDs. These can sometimes be multiple, sometimes malformed, and sometimes pointing to emails outside of the known ones from within our known corpora. The header as "in_reply_to_resolved" means that, on a second pass of every shard file, we have looked up our Message-ID against our internal index, and have discovered a mapping between it and an "internal_id".  Thereby, if the target isn't within our mbox corpora, then "each_in_reply_to_resolved" has the Boolean value as false, but true if it is. Henceforth, if false, we will now know that this "in_reply_to" field has a dangling edge, and so instead of silently generating this as broken node within KG, we can avoid this scenario being created.  We should do the same for each of the values within the "references" array, to give us "each_of_references_resolved' being the Boolean value as true if the test passed, and false otherwise. We need this second pass of every shard file because it might very well be conceivably possible that the email which this present one is "in-Reply-to" lands at a later time than when we are resolving "in_reply_to_resolved", and the same is true for "each_of_references_resolved'.
+"in_reply_to" is a raw header : it holds Message-IDs. These can sometimes be multiple, sometimes malformed, and sometimes pointing to emails outside of the known ones from within our known corpora. The header as "in_reply_to_resolved" means that, on a second pass of every shard file, we have looked up our Message-ID against our internal index, and have discovered a mapping between it and an "internal_id".  Thereby, if the target isn't within our mbox corpora, then "each_in_reply_to_resolved" has the Boolean value as false, but true if it is. Henceforth, if false, we will now know that this "in_reply_to" field has a dangling edge, and so instead of silently generating this as broken node within KG, we can avoid this scenario being created.  We should do the same for each of the values within the "references" array, to give us "each_of_references_resolved" being the Boolean value as true if the test passed, and false otherwise. We need this second pass of every shard file because it might very well be conceivably possible that the email which this present one is "in_reply_to_message_id" lands at a later time than when we are resolving "each_in_reply_to_message_id_resolved", and the same is true for "each_of_references_resolved'.
 
 TO DO. implement this kind of second parsing within "bin/mbox_pre-parser.rb"
 
@@ -52,7 +76,14 @@ TO DO. implement this kind of second parsing within "bin/mbox_pre-parser.rb"
 
 I want to extract the metadata for each of the attachments which are not email-bodies (with a fallback to rfc822 technology for older non-MIME emails), into an array containing entries like :
 ```json 
-{"Content-ID": "", "Content-Type": "", "Content-Disposition": "", "size_of_attachment": "", "filename_of_attachment": "", "unique_attachment_id": "" }
+{
+  "Content-ID": "...", 
+  "Content-Type": "...", 
+  "Content-Disposition": "...", 
+  "size_of_attachment": "...", 
+  "filename_of_attachment": "...", 
+  "unique_attachment_id": "..." 
+}
 ```
 
 ```ruby
@@ -95,7 +126,7 @@ def extract_attachments(raw_email)
   attachments
 end
 ```
-The unless mime_type.start_with?('multipart') guard catches both pure RFC 822 messages (which can't have attachments) *and* single-part MIME messages (which also can't have attachments separate from the body). Everything pre-1993 falls through cleanly, and we handle emails from after 1993 correctly.
+The unless `mime_type.start_with?('multipart')` guard catches both pure RFC 822 messages (which can't have attachments) *and* single-part MIME messages (which also can't have attachments separate from the body). Everything pre-1993 falls through cleanly, and we handle emails from after 1993 correctly.
 
 Ruby's Mail gem gives you `mail.parts` for top-level, `part.content_type`, `part.filename`, `part.body.decoded`, `part.content_id`, `part.content_disposition`. Just iterate and collect. 
 
@@ -108,74 +139,91 @@ The pre-parser outputs **one row per email message**, not one row per thread or 
 
 The pre-parser outputs one JSONL row per email message (not per thread). If a 264-message thread's emails are broken across `part-00003.jsonl` and `part-00004.jsonl` by arrival order, "bin/splitter.rb" reassembles the full thread via `thread_id` grouping into RAM before applying any windowing logic.
 
-At what stage does the "timestamp" get written into the output shard files from "bin/mbox_pre-parser.rb"?  Answer. At **ingest time**.  When "bin/mbox_pre-parser.rb" appends new rows, it stamps into them the timestamp, which is derived from the either, (1) the "Date:" field from within the email, or (2) `File.mtime(mbox_path).strftime('%Y-%m')`, i.e. the mbox modification time : which is the latest time this particular mbox was written to.  So, thus, this timestamp is *not* derived from the "Received:" heading (which is within the email).  This is good because it will avoid a race condition if the "Date:" is the last seconds of the month, but the "Received:" is a few minutes later.  We don't want the cohort to jump in this case, just to be pedantic. 
+At what stage does the "alleged_timestamp_sent" get written into the output shard files from "bin/mbox_pre-parser.rb"?  Answer. At **ingest time**.  When "bin/mbox_pre-parser.rb" appends new rows, it stamps into them the timestamp, which is derived from the either, (1) the "Date:" field from within the email, or (2) `File.mtime(mbox_path).strftime('%Y-%m')`, i.e. the mbox modification time : which is the latest time this particular mbox was written to.  So, thus, this timestamp as "alleged_timestamp_sent" is *not* derived from the "Received:" heading (which is within the email). The "Date:" heading is when the sender's client **claims** it was sent ; it is set by the Mail User Agent, and is not verified by anyone, so it can be wrong or spoofed.  The "Received:" headers are more trustworthy. Each Mail Transfer Agent adds one as the message passes through it, and is processed by it, timestamping it when *it* received it. Multiple "Received:" headers form a chain from the recipient back to the sender, as read from the top downwards within an mbox.  We only need this "alleged_timestamp_sent" field as data within the shard files to present to the user within RAG, *not* so that "bin/splitter.rb" can sort the messages within any given thread to become in order so that the LoRA training will experience them chronologically. 
 
-When "bin/mbox_pre-parser.rb" appends new rows, it also stamps into them the key as "received" with a value as a non-localised universal-time timestamp (which an example of the format is as "2025-01-15T09:30:00Z"), which is derived from the either: (1) the "Date:" field from within the email, (2) the value of the key as the "Received:" field from within the email, (this will be the first "Received:" field read, so the latest one if the email contains another email which this email is as a reply to, or the present email is as a forwarded email, which will contain the same), or (3) `File.mtime(mbox_path).utc.iso8601` (i.e. the mbox modification time, which is the latest time this particular mbox was written to).
+When "bin/mbox_pre-parser.rb" appends new rows, it also stamps into them the key as "timestamp_received" with a value as a non-localised universal-time timestamp (which an example of the format is as "2025-01-15T09:30:00Z"), which is derived from the either: (1) the top-most value of the key as the "Received:" field from within the email within the mbox, (this will be the top-most "Received:" field read, so will be the latest one (in time) if the email contains another email which this email is as a reply to, or the present email is as a forwarded email, which will contain the same), or (2) `File.mtime(mbox_path).utc.iso8601` (i.e. the mbox modification time, which is the latest time this particular mbox was written to). We only need this "timestamp_received" field as data within the shard files to present to the user within RAG. Neither the Vector DB, nor KG, nor LoRA training require any sort of chronology within their creation/training, or retrieval at all. 
 
-We only need this "received" field as data to present to the user within RAG, *not* so that "bin/splitter.rb" can sort the messages within any given thread to become in order so that the LoRA training will experience them chronologically. 
-
-Nor does the file as "bin/splitter.rb" utilize the `in_reply_to_message_id:` or `original_message_id:` from these shard files output at ingest time.  We need the `in_reply_to_message_id:` and `original_message_id:` fields in these shard files for KG : i.e. to use as metadata when constructing knowledge graphs. At **digest time** "bin/splitter.rb" groups threads by `thread-id:` and hashes for split assignment, then "bin/window_maker.rb" windows groupings of the "skinny" metadata (which excludes the email-bodys' texts), not of any chronological order, for the purposes of KG creation.  Neither RAG, nor KG, nor LoRA training require any sort of chronology within their creation/training, or retrieval at all.  The `timestamp` metadata of each email is treated as a "property" : properties are key-value data attached to nodes or edges. A "property" might look like `{timestamp: "2025-01-15T09:30:00Z", original_message_id: "<abc123@example.com>"}`. 
+Nor does the script-file as "bin/splitter.rb" utilize the `in_reply_to_message_id:`, or `original_message_id:`, from these shard files output at ingest time.  The script-file as "bin/splitter.rb" segregates all the emails from individualized email-threads into a specific set such as train/val/test, which are virtual sets, and don't get written to ny file except the immutable manifest file as "assignments.jsonl".  We need the `in_reply_to_message_id:`, and `original_message_id:`, fields in these shard files for KG : i.e. to use as metadata when constructing knowledge graphs, because at **digest time** "bin/window_maker.rb" groups threads by `thread-id:`, and without hashing for split assignment, and without referring to the file as "assignments.jsonl" at all, or these splits contained with it, "bin/window_maker.rb" windows groupings of super-"skinny" metadata, which is *not* of any chronological order, for the purposes of KG creation.   The `alleged_timestamp_sent`, and the `timestamp_received` metadata of each email is treated as a "property" : properties are key-value data attached to nodes or edges. A "property" might look like `{timestamp: "2025-01-15T09:30:00Z", original_message_id: "<abc123@example.com>"}`. 
 
 TO DO.  Implement `in_reply_to_message_id:` and `original_message_id` plus all these other fields within "bin/mbox_pre-parser.rb".  
-TO DO. Replace the cohort_id from "bin/mbox_pre-parser.rb" by a "timestamp" derived from email-headers, or from mtime of mbox (if those headers are not present).
+TO DO. Replace the cohort_id from "bin/mbox_pre-parser.rb" by a "alleged_timestamp_sent" and a "timestamp_received", derived from email-headers, or from mtime of mbox (if those headers are not present).
 
 ## What is a split?
-A split is the role tag on each manifest row (train, val, or test) within "assignments.json" which controls which "split file" it materializes into ("train.jsonl", "val.jsonl", or "test.jsonl"), and how these splits become updated.
+A split is the role tag on each manifest row (train, val, or test) within "assignments.json" which controls which virtual set within "assignments.jsonl" a particular thread lands within, and how these threads become updated within the same split (with the same tag as all other messages within that same thread).
 
 ## How to input mboxes into mboxMinerva backend.
-When a new corpus (or corpora) of emails arrive (in the form of one mbox, or several mboxes), from a readable location on the storage backend, we want a function called "bin/input_mbox.rb" to put this mbox, or these mboxes, to a storage location upon the backend (the host, in our case) with a unique path. Instead of changing the name of the mbox file (which may cause the the user some confusion) we ought to assign each mbox to its own unique directory name.  This should be accomplishable via assignment of a timestamp to the directory name in the case of a single mbox (i.e. `./input_files/raw_mbox_files/until_<timestamp>_00001/myEmails.mbox`), and a unique directory name in the case of it (the "bin/input_mbox.rb" script) being run with multiple arguments.  For example, if we run `input_mbox.rb /path/to/multiple/mboxes/**/*` (recurses one level deep into subdirectories), or if we run `find /path/to/multiple/mboxes -type f -exec ./input_mbox.rb {} +` (which collects as many filenames as possible recursively to one single `input_mbox.rb` invocation), we want the directory names of the paths to each mbox file to be unique, (i.e. `./input_files/raw_mbox_files/until_<timestamp>_00001/myEmails.mbox`, and `./input_files/raw_mbox_files/until_<timestamp>_00002/someMoreEmails.mbox`). Thus by having unique directory names, we can avoid a path collision if the filenames of the mboxes are the same.
+When a new corpus (or corpora) of emails arrive (in the form of one mbox, or several mboxes), from a readable location on the storage backend (the admission area), we want a function called "bin/commit_mbox.rb" to move this mbox, or these mboxes, to a storage location upon the backend (the host, in our case) with a unique path. Instead of changing the name of the mbox file (which may cause the the user some confusion) we ought to assign each mbox to its own unique directory name.  This should be accomplishable via assignment of a timestamp to the directory name in the case of a single mbox (i.e. `./input_files/committed_mbox_files/until_<timestamp>_00001/myEmails.mbox`), and a unique directory name in the case of it (the "bin/commit_mbox.rb" script) being run with multiple arguments.  For example, if we run `commit_mbox.rb /path/to/multiple/mboxes/**/*` (recurses one level deep into subdirectories), or if we run `find /path/to/multiple/mboxes -type f -exec ./commit_mbox.rb {} +` (which collects as many filenames as possible recursively to one single `commit_mbox.rb` invocation), we want the directory names of the paths to each mbox file to be unique, (i.e. `./input_files/committed_mbox_files/until_<timestamp>_00001/myEmails.mbox`, and `./input_files/committed_mbox_files/until_<timestamp>_00002/someMoreEmails.mbox`). Thus by having unique directory names, we can avoid a path collision if the filenames of the mboxes are the same.
 
-We want to have a "manifest_of_inputted_mboxes.jsonl" containing these paths in association with the SHA256 hexdigest for each of these inputted mboxes.  We will use the JSONL format as:
+We want to have a file as "manifest_of_committed_mboxes.jsonl" containing these paths in association with the SHA256 hexdigest for each of these inputted mboxes.  We will use the JSONL format as:
 ```jsonl
-{ "path": "./until_2026-03-24T18:47:00Z_00002/a.mbox",
+{ 
+  "commitment_path": "./until_2026-03-24T18:47:00Z_00002/a.mbox",
   "sha256": "a1b2c3...",
   "size":1048576,
-  "file_added_at":"2026-03-24T18:47:00Z"
+  "file_committed_at":"2026-03-24T18:47:00Z"
 }
 ```
 
-The script as "bin/verify_integrity_of_mboxes" will parse each line of the manifest as "manifest_of_inputted_mboxes.jsonl" and compute `Digest::SHA256.hexdigest(file)`, comparing this against the manifest hash and output a message to say whether everything passed, or what failed. 
+The script as "bin/verify_integrity_of_mboxes" will parse each line of the manifest as "manifest_of_committed_mboxes.jsonl" and compute `Digest::SHA256.hexdigest(file)`, comparing this against the manifest hash and output a message to say whether everything passed, or what failed. 
 
 TO DO. create the script as "bin/verify_integrity_of_mboxes" to do just that.
 
-I want "bin/input_mbox.rb" to append to the "manifest_of_inputted_mboxes.jsonl", and I want "bin/mbox_pre-parser.rb", *not* to update this manifest file, but merely read from it : to read from it *before* "bin/mbox_pre-parser.rb" has processed any mboxes, upon every invocation of "bin/mbox_pre-parser.rb". 
+I want "bin/commit_mbox.rb" to append to the "manifest_of_committed_mboxes.jsonl", and I want "bin/mbox_pre-parser.rb", *not* to update this manifest file, but merely read from it : to read from it *before* "bin/mbox_pre-parser.rb" has processed any mboxes, upon every invocation of "bin/mbox_pre-parser.rb". 
 
-"bin/mbox_pre-parser.rb" will keep its own manifest called "manifest_of_processed mboxes.jsonl" at the location as `./pre-parsed/`.  This file will be appended to *after* all the currently-being-processed mboxes become processed.  The format will be :
+"bin/mbox_pre-parser.rb" will keep its own manifest called "manifest_of_ingested_mboxes.jsonl" at the location as `./pre-parsed/`.  This file will be appended to *after* all the currently-being-processed mboxes become processed.  The format will be :
 ```jsonl
-{ "path": "./until_2026-03-24T18:47:00Z_00002/a.mbox",
-  "mbox_processed_at":"2026-03-24T18:47:00Z"
+{ 
+  "sha256": "a1b2c3...",
+  "ingest_path": "./until_2026-03-24T18:47:00Z_000001/",
+  "mbox_ingested_at":"<timestamp>",
+  "shard_count": 318
+},
+{ 
+  "sha256": "efg123...",
+  "ingest_path": "./until_2026-03-24T18:47:00Z_000002/",
+  "mbox_ingested_at":"<timestamp>",
+  "shard_count": 174
 }
 ```  
-This way we are keeping a record of what got put in to the pipeline immediately *after* it has been putten in.  "bin/mbox_pre-parser.rb" will only process mboxes which have *not* already been recorded within the manifest file as "manifest_of_processed mboxes.jsonl" but *are* within the manifest file as "manifest_of_inputted_mboxes.jsonl".  The idea is that we are keeping a forensic record of `./input_files/` directory so that the whole program of mbox processing can be recalculated from scratch upon the same computer system, or a different one.  I will keep the manifest file as "manifest_of_inputted_mboxes.jsonl" in the directory as `./input_files/raw_mbox_files`, but I will keep the append-to "generic_DSR_record_manifest.jsonl" file in the location as `./input_files/`. 
+This way we are keeping a record of what has been ingested immediately *after* it has been putten in.  "bin/mbox_pre-parser.rb" will only process mboxes which have *not* already been recorded within the manifest file as "manifest_of_ingested_mboxes.jsonl", but which *are* within the manifest file as "manifest_of_committed_mboxes.jsonl".  The idea is that we are keeping a forensic record of the default `./committed_mbox_files/` directory, so that the whole program of mbox processing can be recalculated from scratch upon the same computer system, or a different one.  I will keep the manifest file as "manifest_of_committed_mboxes.jsonl" in the default directory as `./committed_mbox_files/committed_mbox_files`, but I will keep the append-to file as "manually_excluded_tombstones.jsonl", and the file as "spotcheck_manual_exclusions.jsonl" in the default location as `./committed_mbox_files/`. 
 
-If `./input_files` is the user's current working directory, then `./raw_mbox_files/` is the name of the directory which gets written to put the directories containing mboxes in.  Thus "bin/input_mbox.rb" will have a `--prefix ./input_files` option, and "bin/mbox_pre-parser.rb" will have an `--input ./input_files` option.  
+One JSONL row refers to how many shards this mbox was split across. "sha256" within "manifest_of_ingested_mboxes.jsonl" identifies the source mbox. "shard_count" tells you how many shard files have been produced, and the directory as `./until_<timestamp>_000001` is your physical lookup. pre-LoRA will glob that directory which is sorted by filename as it may contain many shards, each of which shall be parsed in order.  Thus we have no need to enumerate every shard path in each JSONL row.
 
-`./input_files/generic_DSR_record_manifest.jsonl` keeps a master record (not expanded to individual "internal_id"s) of what DSRs got submitted when, and when it became processed.
+`./committed_mbox_files/manually_excluded_tombstones.jsonl` keeps a master record (not expanded to individual `internal_id`s) of what DSRs got submitted when, and when it became processed.
 
-Thus if you wanted to reprocess all your existing mbox files (while keeping all the known DSRs) then the first step in this pipeline would be to run "bin/mbox_pre-parser.rb" to pre-parse (ingest) these mboxes after having deleted, moved, or renamed, the manifest file as `./input_files/raw_mbox_files/manifest_of_inputted_mboxes.jsonl` *and* having moved, or deleted, the contents of `./pre-parsed/` (which is the default directory location of the output from "bin/mbox_pre-parser.rb"). You would also subsequently need to expand all your DSRs to know which "internal_id"s are to be omitted from LoRA, RAG, and KG.  Then you would rebuild LoRA, do a rollover (to the new LoRA), and rebuild both RAG and KG.
+Thus, if you wanted to reprocess all your existing mbox files (while keeping all the known DSRs) then the first step in this pipeline would be to run "bin/mbox_pre-parser.rb" to pre-parse (ingest) these mboxes after having deleted, moved, or renamed, the manifest file as `./committed_mbox_files/manifest_of_committed_mboxes.jsonl` *and* having moved, or deleted, the contents of `./pre-parsed/` (which is the default directory location of the output from "bin/mbox_pre-parser.rb"). You would also subsequently need to expand all your DSRs to know which "internal_id"s are to be omitted from LoRA, Vector DB, and KG.  Then you would rebuild LoRA, do a rollover (to the new LoRA), and rebuild both Vector and KG.
 
-TO DO implement "bin/input_mbox.rb" in this way, i.e. implement the creation of `./<prefix>/raw_mbox_files/until_<timestamp>_00001/myEmails.mbox`, where `--prefix these_inputted_files` will result in the creation of `./these_inputted_files/raw_mbox_files/until_<timestamp>_00001/myEmails.mbox`.
+TO DO implement "bin/commit_mbox.rb" in this way, i.e. implement the creation of `./<output-prefix>/committed_mbox_files/until_<timestamp>_00001/myEmails.mbox`, where `--output-prefix these_inputted_files` will result in the creation of `./these_inputted_files/committed_mbox_files/until_<timestamp>_00001/myEmails.mbox`.
 
-If you want this file as "manifest_of_inputted_mboxes.jsonl" to be append_only within the Host operating system, via `chattr +a manifest_of_inputted_mboxes.jsonl`, which works if we have bind-mounted the Host directory into the Container, be aware that this works on ext4, but not on overlayfs (Docker containers). Alpine needs `e2fsprogs` for `chattr`. **But** the container can also run `chattr -i` and `chattr -a` to undo it, so only gives a protection against accidents, not a compromised container process.  It is in my opinion, by and large a waste of time to attempt.
+If you want this file as "manifest_of_committed_mboxes.jsonl" to be append_only within the Host operating system, via `chattr +a manifest_of_committed_mboxes.jsonl`, which works if we have bind-mounted the Host directory into the Container, be aware that this works on ext4, but not on overlayfs (Docker containers). Alpine needs `e2fsprogs` for `chattr`. **But** the container can also run `chattr -i` and `chattr -a` to undo it, so only gives a protection against accidents, not a compromised container process.  It is in my opinion, by and large a waste of time to attempt.
 
-TO DO implement "bin/mbox_pre-parser.rb" to read `./<prefix>/manifest_of_inputted_mboxes.jsonl` (i.e. `./these_inputted_files/manifest_of_inputted_mboxes.jsonl` if the `--prefix these_inputted_files` is used to "bin/mbox_pre-parser.rb"), and process any mbox file which is listed within the "manifest_of_inputted_mboxes.jsonl" file, but is not listed within the file as "manifest_of_processed mboxes.jsonl".
+TO DO implement "bin/mbox_pre-parser.rb" to read `./<input-prefix>/manifest_of_committed_mboxes.jsonl` (i.e. `./these_inputted_files/manifest_of_committed_mboxes.jsonl` if the `--input-prefix these_inputted_files` is used to "bin/mbox_pre-parser.rb"), and process any mbox file which is listed within the "manifest_of_committed_mboxes.jsonl" file, but is not listed within the file as "manifest_of_ingested_mboxes.jsonl".
 
-TO DO. allow an option to change the default directory location of the output from "bin/mbox_pre-parser.rb" (from `./pre-parsed/` to `./these_pre-parsed/` if `--output these_pre-parsed/` is used).  Add another option as `--input these_inputted_files` "bin/mbox_pre-parser.rb" to allow specification of the directory where the user has previously located  the `./raw_mbox_files` directory.
+TO DO. allow an option to change the default directory location of the output from "bin/mbox_pre-parser.rb" (from `./pre-parsed/` to `./these_pre-parsed/` if `--output-prefix these_pre-parsed/` is used).  
 
-"bin/mbox_pre-parser.rb" will exclude those older mboxes which *are* already listed (mentioned) within this manifest file as "manifest_of_inputted_mboxes.jsonl", and *are* already listed within the manifest file as "manifest_of_processed mboxes.jsonl".
+"bin/mbox_pre-parser.rb" will exclude those mboxes, the SHA256 of which *are* already listed (mentioned) within the manifest file as "manifest_of_committed_mboxes.jsonl", and *are* already listed within the manifest file as "manifest_of_ingested_mboxes.jsonl".  Note that we are keeping the file as "manifest_of_ingested_mboxes.jsonl", by default, at the location as `./pre-parsed`, or at the location which is specified by the option as `--output-prefix <another location>` to "bin/mbox_pre-parser.rb". 
 
-Note that "bin/input_mbox.rb" specifies a directory within its path as `until_<timestamp>_00001` (i.e. `./input_files/raw_mbox_files/until_<timestamp>_00001/myEmails.mbox`), rather than as `from_<previous_timestamp>_to_<present_timestamp>` because an email arriving within the month of July 2025 might be as a response to an email that previously arrived in January, and thus within the same email thread. Here `./input_files/raw_mbox_files/until_<timestamp_in_august>_00001/myEmails.mbox` will capture, and include, this latest email, and its metadata will be attributed to the correct split, and the correct thread, within the manifest file as "assignments.jsonl".  This is why we do not attribute a date range to the name of this subdirectory, because it would be misleading to say `from_<previous_timestamp_in_july>_to_<present_timestamp_in_august>`, as nothing would exclude the possibility that it contains a message in response to a January thread, or that the original email in January didn't arrive, by some strange technical problem, until the month of July.
+Note that "bin/commit_mbox.rb" specifies a directory within its path as `until_<timestamp>_00001` (i.e. `./input_files/committed_mbox_files/until_<timestamp>_00001/myEmails.mbox`), rather than as `from_<previous_timestamp>_to_<present_timestamp>` because an email arriving within the month of July 2025 might be as a response to an email that previously arrived in January, and thus within the same email thread. Here `./input_files/committed_mbox_files/until_<timestamp_in_august>_00001/myEmails.mbox` will capture, and include, this latest email, and its metadata will be attributed to the correct split, and the correct thread, within the manifest file as "assignments.jsonl".  This is why we do not attribute a date range to the name of this subdirectory, because it would be misleading to say `from_<previous_timestamp_in_july>_to_<present_timestamp_in_august>`, as nothing would exclude the possibility that it contains a message in response to a January thread, or that the original email in January didn't arrive, by some strange technical problem, until the month of July.
 
 ## What is a rollover?
-A planned rollover involves the flipping of a symlink.  This symlink may point to the actual model checkpoint (LoRA adapter) directory, which may reside, for example, at `current/releases/2025-01-15-clean` so that flipping the symlink would atomically switch from serving the old adapter to the newly trained DSR-clean one without changing any runtime configurations.
+A planned rollover involves the flipping of a symlink.  This symlink may point to the actual model checkpoint (LoRA adapter) directory, which may reside, for example, at `current/releases/2025-01-15-clean`, so that flipping the symlink would atomically switch from serving the old adapter to the newly trained DSR-clean one, without changing any runtime configurations.
 
 ## What is a materialization?
-Materialization is the process of extracting previously split data from the immutable manifest (the file "assignments.json") and writing the results to all of the files as "train.jsonl", "val.jsonl", and "test.jsonl".  This is done by the command as "bin/window_maker.rb".  This command will exlude from the pool/set files all the "internal_id"s which have been listed as tombstoned within the file as "expanded_DSR_exclusions_manifest.jsonl"
+Materialization is the process of extracting previously split data from the immutable manifest (the file "assignments.json") and writing the results to all of the files as "train.jsonl", "val.jsonl", and "test.jsonl".  This is done by the command as "bin/splitter.rb", which reads the parsed shard files, and writes "assignments.jsonl" *and* these three pool files in **one pass**.  This command will exclude from the pool/set files all the "internal_id"s which have been listed as tombstoned within the file as "manually_excluded_tombstones.jsonl".
+
+## What is the purpose of materialization?
+As my immutable manifest file as "assignments.jsonl" contains the emails from each thread assigned to one and only one of train/val/test tags, is there any point of materialization of this data to a "train.jsonl" file, a "val.jsonl" file, and a "test.jsonl" file.  Can't I just read from "assignments.jsonl" and feed this data to pre-LoRA, and hence LoRA, training?  Answer: filtering per-epoch is wasteful, because you would be loading 100% of rows and filtering to 80% of the total upon every epoch.  This is avoidable I/O (input/output). Accepting this point, we must also observe that the materialized files are super-skinny : they contain the (non-windowed) metadata as `internal_id:, split_tag:, which_pre-parsed_shard_file:, location_within_this_shard_file` which is copied from the "assignments.jsonl", which obviously also must contain this data. The field as "which_pre-parsed_shard_file" refers to which particular shard file this "internal_id" came from (when it was being written to the file as "assignments.jsonl"). The file as "assignments.jsonl" must also contain the field as "thread_id" because this is metadata about ***how*** a particular "internal_id" ended up within the materialized file as "train.jsonl", that of "val.jsonl", or that of "test.jsonl".  But as our LoRA training is just iterating message-bodies, we don't need a field as "thread_id" within the file as "train.jsonl" because we do not need any thread awareness at training time. 
+
+## How does materialization handle DSR omissions done to data?
+Question. The "DSR deletion" request for "joe@bloggs.com" comes in. Then, 6 months after this DSR is processed, an email from "joe@bloggs.com" arrives within a corpus of emails.  This results in a record of this email-address (user) being written into the file as **"manually_excluded_tombstones.jsonl"**. In addition to this, a previous "DSR access" request for "helen@xyz.com" resulted in this user making a "DSR deletion" request specifically for an email message which has the internal_id as "abc-123".  So, this will result in a record of this specific email's "internal_id" being written into the file as "manually_excluded_tombstones.jsonl" also.  For clean auditing purposes, neither of these DSR will either delete existing records from within "assignments.jsonl", nor prevent future metadata of emails from "joe@bloggs.com" from entering the existing records within "assignments.jsonl".  This is as it should be as we get a complete audit trail within "assignments.jsonl". Legal problems might arise when we consider the legal grey area of what the difference is between a GDPR deletion, and a GDPR resriction.  The former is supposed to be: data is gone, purged, erased.  *If* we literally did this we would have *no* audit trail, which might be required in a criminal investigation if a law enforcement officical asks for data which has been taken down already.  The latter (a GDPR restriction) is that the data is kept but we stop processing it.  So in effect, all our "DSR deletion" requests prevent the serving of data which has been taken down, but this data is kept for later forensic analysis if required.  This particular GDPR law of enabling a user to defy a forensic audit trail, is ill-thought-out, in my opinion.  Maybe this law will be "deleted" in the future.
+
+## How does "bin/splitter.rb" handle materialization in one pass?
+The command as "bin/splitter.rb", which reads the parsed shard files, writes "assignments.jsonl" *and* the three output files as "train.jsonl", "val.jsonl", and "test.jsonl" in **one pass** via loading the exclusions from the file as "manually_excluded_tombstones.jsonl" into a Set, by which, if any of the relevant fields as "internal_id", OR "from" match, then this match is skipped when materializing.  This is all done in one pass.  Be aware that matching on "from" is broader than matching upon "internal_id".  The former will catch *every* message, past and future, whereas the latter will only target a particular message.
 
 ## What is a retrain?
-The difference between a retrain and materialization is that during a retrain we are actually retraining LoRA adapters to fit on top of an existing large language model, while a materialization is when the metadata files (train/val/test.jsonl) which the latest model reads, are deterministically rebuilt from our immutable manifest "assignments.json".  
+The difference between a retrain and materialization is that during a retrain we are actually retraining LoRA adapters to fit on top of an existing large language model, while a materialization is when the metadata files as "train.jsonl", "val.jsonl", and "test.jsonl" (the email-bodies pertaining to which are fed to the pre-training stage), are deterministically rebuilt from our append-only immutable manifest "assignments.json".  
  
-Upon materialization, the data which is tombstoned in the "expanded_DSR_exclusions_manifest.jsonl" immutable manifest file simply does not get written into any of the new "train.jsonl", "val.jsonl" and "test.jsonl". We then may retrain the model from its base checkpoint by creating a new LoRA adaptor and refitting it : it is like painting a new canvas, as opposed to merely touching up the old one.  So, if I retrain the model using this newer train/val/test (with those tombstones), in practice the trained model *replaces* the previous adapter which was fitted upon the base model.  You don't layer adapters in order to forget things.  Instead, you swap in a freshly trained one that never saw the deleted rows in the first place.  Because we retrain when specific key performance indicators are breached (say, "max staleness"), or upon a fixed cadence (say, as a time period between every 6 to 12 months), then upon a receipt of a DSR deletion request, we may retrain upon whichever comes first: the breach of specific performance indicators (if **drift**, or the **exclusion-backlog**, shows that our LoRA adapter which sits atop an existing LLM is getting stale), or this fixed cadence ; and hence we may fulfill legal, or contractual, obligations to have done so within the service level agreement, which may have stipulated a clause such like "the model is always up-to-date with data, such that the data it is trained upon is never older than 6 months, prior to the date of the present moment, and hence DSRs are always updated to this model (i.e. deleted from it) periodically every six months, or sooner". 
+Upon materialization, the data which is tombstoned in the "manually_excluded_tombstones.jsonl" immutable manifest file simply does not get written into any of the new "train.jsonl", "val.jsonl" and "test.jsonl". We then may retrain the model from its base checkpoint by creating a new LoRA adaptor and refitting it. This is like painting a new canvas, as opposed to merely touching up the old one.  So, if I retrain the model using these newer "train.jsonl", "val.jsonl" and "test.jsonl" (with those tombstones), in practice the trained model *replaces* the previous adapter which was fitted upon the base model.  You don't layer adapters in order to forget things.  Instead, you swap in a freshly trained one that never saw the deleted rows in the first place.  Because we retrain when specific key performance indicators are breached (say, "max staleness"), or upon a fixed cadence (say, as a time period between every 6 to 12 months), then upon a receipt of a DSR deletion request, we may retrain upon whichever comes first : the breach of specific performance indicators (if **drift**, or the **exclusion-backlog**, shows that our LoRA adapter which sits atop an existing LLM is getting stale), or this fixed cadence ; and hence we may fulfill legal, or contractual, obligations to have done so within the service level agreement, which may have stipulated a clause such like "The model is always up-to-date with data, such that the data it is trained upon is never older than 6 months, prior to the date of the present moment, and hence DSRs are always updated to this model (i.e. deleted from it) periodically every six months, or sooner". 
 
 ## What is exclusion-backlog?
 Exclusion-backlog is simply the growing pile of new emails, ingested and digested (and hence referred to within the skinny metadata immutable append-only manifest file as "assignments.jsonl"), that the most recent LoRA adapter currently in use, has not yet been trained upon.  We measure it as a count, and as a percentage of, recently received email data that is out-of-scope for train/val/test at this current time, and once that count or percentage passes a threshold, this is our cue to train LoRA, depending upon your organisation's operational decision-making, and policy decisions.
@@ -184,81 +232,258 @@ TO DO. make sure that "bin/mbox_pre-parser.rb" triggers the updating of a record
 
 TO DO . make sure that after a rollover, exclusion-backlog is reset.
 
-## What would happen if I receive a DSR deletion request for data, and then run "bin/window_maker.rb"?  Would then, "bin/window_maker.rb" wipe its data out within these files as "train.jsonl", "val.jsonl", and "test.jsonl"?  
+## What would happen if I receive a DSR deletion request for data, and then run "bin/splitter.rb"?  Would then, "bin/splitter.rb" wipe its data out within these files as "train.jsonl", "val.jsonl", and "test.jsonl"?  
 Answer : Yes.
 
-TO DO. Ensure that a "bin/dsr_change.rb delete" when completed with also result in "expanded_DSR_exclusions_manifest.jsonl" receiving appended (newer) entries with all the "internal_id"s pertaining to this particular DSR request having been listed (for omission from LoRA training, RAG building and KG creation).  
+## The "manually_excluded_tombstones.jsonl" file output by "bin/dsr_delete.rb".
+We have an immutable (append-to only) "manually_excluded_tombstones.jsonl" file, within the same directory as the "manifest_file_of_inputted_mboxes.jsonl" (in this case `./committed_mbox_files`) which is of the format, for a specific message deletion, as:
+```jsonl
+{
+  "dsr_id": "dsr-2026-00042",
+  "dsr_type": "delete",
+  "scope": "internal_id",
+  "value_of_deleted_item": "abc-123",
+  "email_of_dsr_requestor": "bob@x.com",
+  "requestor_type": "data_subject",
+  "jurisdiction": "GDPR",
+  "requested_at": "2026-03-20T10:00:00Z",
+  "processed_by": "admin_alice",
+  "processed_at": "2026-03-24T18:00:00Z",
+  "confirmation_sent_at": "2026-03-24T18:05:00Z",
+  "confirmation_sending_to": "BobSmith@456.com",
+  "reason": "user_request",
+  "comments": "Requested via support ticket #12345"
+}
+```
+and by a specific email-address deletion is as:
+```jsonl
+{
+  "dsr_id": "dsr-2026-00042",
+  "dsr_type": "delete",
+  "scope": "from",
+  "value_of_deleted_item": "joe@bloggs.com",
+  "email_of_dsr_requestor": "bob@x.com",
+  "requestor_type": "data_subject",
+  "jurisdiction": "GDPR",
+  "requested_at": "2026-03-20T10:00:00Z",
+  "processed_by": "admin_alice",
+  "processed_at": "2026-03-24T18:00:00Z",
+  "confirmation_sent_at": "2026-03-24T18:05:00Z",
+  "confirmation_sending_to": "BobSmith@456.com",
+  "reason": "user_request",
+  "comments": "Requested via support ticket #12345"
+}
+```
+Our logic is if scope=email, match against "from"/"to"/"cc" ; if scope=internal_id, match against internal_id.  The former (matching against "from"/"to"/"cc") might seem a bit severe, but it is implemented this way because the sender may have sent some content which got repeated within a reply message.
+
+The useful fields are : "dsr_id" for cross-referencing, "processed_by" for audit trails, "completed_at" to prove you honored the 30-day GDPR deadline, "jurisdiction" if you ever deal with GDPR vs CCPA vs other regimes. "confirmation_sent" is often legally required : you must tell the subject you complied. The rest is nice to have depending on how much audit pain you want to avoid later. In a different framework, "scope" may be required to distinguish "delete my account" from "delete this one email", but as we are not dealing with accounts, and only emails addresses, the `"scope": "from"` is taken to mean that the "value_of_deleted_item" is that of an email address. 
+
+Thus our directory listing of `./committed_mbox_files` may look like (among other raw mbox files): 
+```bash
+-rw-rw-r--   1 dmr104 dmr104   9728 Mar 11 14:33 manually_excluded_tombstones.jsonl
+-rw-rw-r--   1 dmr104 dmr104   9728 Mar 11 14:33 spotcheck_manual_exclusions.jsonl
+-rw-rw-r--   1 dmr104 dmr104  27965 Jan 15 05:23 manifest_file_of_committed_mboxes.jsonl
+drwxrwxr-x   2 dmr104 dmr104   4096 Nov  9 12:42 until_2026-03-24T18:47:00Z_00002/a.mbox
+```
+
+Here is a JSON schema for one line of our DSR manifest:
+```jsonl
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["dsr_id","scope","value","requested_at","jurisdiction","reason","requestor_type"],
+  "properties": {
+    "dsr_id":                   {"type": "string", "pattern": "^dsr-[0-9]{4}-[0-9]+$"},
+    "dsr_type":                 {"type": "string", "enum": ["access","delete"]},
+    "scope":                    {"type": "string", "enum": ["from","internal_id"]},
+    "value_of_deleted_item":    {"type": "string"},
+    "email_of_dsr_requestor":   {"type": "string", "pattern": "^[a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z]{2,}$"},
+    "requestor_type":           {"type": "string", "enum": ["data_subject","authorized_representative","guardian"]},    
+    "jurisdiction":             {"type": "string", "enum": ["GDPR","CCPA_CPRA","LGPD","PIPL","PIPEDA","PDPA","POPIA","APPI"]},
+    "requested_at":             {"type": "string", "format": "date-time"},
+    "processed_by":             {"type": "string"},
+    "processed_at_time":        {"type": ["string"], "format": "date-time"},
+    "confirmation_sent_at":     {"type": ["string","null"], "format": "date-time"},
+    "confirmation_sending_to":  {"type": ["string","null"], "pattern": "^[a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z]{2,}$"},
+    "reason":                   {"type": "string", "enum": ["erasure","restriction","access"]},
+    "comments":                 {"type": "string"}
+  },
+  "additionalProperties": false,
+  "if":   {"properties": {"scope": {"const": "from"}}},
+  "then": {"properties": {"value": {"pattern": "^[a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z]{2,}$"}}},
+  "else": {"properties": {"value": {"pattern": "^[a-z0-9.]+$"}}}
+}
+```
+The if/then/else at the bottom is the payoff of keeping scope separate - JSON Schema validates value conditionally so you never mix up an email where an internal_id belongs.
+
+Notes: "processed_at_time" is null until actioned ; and "reason" distinguishes Art. 17 "right to erasure" (right to be forgotten) from Art. 18 "right to restriction of processing" so your filter logic *might* under Art. 17, in theory, delete these items from the pre-processed shard files, but this *would* break forensic audit trails which might be necessary to investigate criminal activity of the email sender. So we intepret Art. 17 to be, in practice, the same as Art 18 : which means to keep the data within the shard files on disk, but to stop it ever reaching LoRA materialization, or RAG retrieval results.  This is the best we can do I am afraid, because big tech companies often get criticised for not doing enough to protect the general public. If the law allows the user to break an forensic audit trail, then in my opinion, I am araid that the law is an ass. 
+
+TO DO 
+Implement this DSR immutable manifest as "manually_excluded_tombstones.jsonl" being appended to by the script as "bin/dsr_delete.rb", and by the script as "bin/dsr_access.rb" : the latter of which, will give the user all data we have upon him/her, adding a record of the this DSR being processed to the file as "manually_excluded_tombstones.jsonl".  The "dsr_id" will be incremented automatically, as will "processed_at_time" be calculated automatically. "bin/dsr_access.rb" will write its output to the file specified by the compulsory argument as `--write_results_to  myfile`, and will fail politely returning an error to the user about the input criteria, otherwise.  In addition to these scripts as "bin/dsr_delete.rb" and "bin/dsr_access.rb", we have another script called "bin/dsr_scan.rb", which will return an abbreviated form of the results that "bin/dsr_access" would produce, to STDOUT by default, or to `--output_to_file tempfile`.  If the option as `--verbose` is used, then the same non-abbreviated results that "bin/dsr_access.rb" would produce, are output from "bin/dsr_scan.rb". In the results from both "bin/dsr_access.rb" and "bin/dsr_scan.rb", it will be indicated both textually, and in the colour of the text and/or background colour whether or not the results which are being returned are tombstoned already.  
+
+"bin/dsr_delete.rb" will require the options generically, which a specific example of is as `--from "bob@x.com" --requested_at "2026-03-20T10:00:00Z" --processed_by: "admin_alice" --confirmation_sent_to "BobSmith@456.com" --reason: "access", --comments: "Requested via support ticket #12345"`.  The options as `--confirmation_sent_at: "2026-03-24T18:05:00Z"` and `--confirmation_sent_to "BobSmith@456.com` will be optional.  This is to faciliate the possiblity that an email was manually set to BobSmith@456.com, prior to this admin processing it, whereas if the option as `--confirmation_sent_at` is omitted but the option as `--confirmation_sending_to` is present with its argument, then mboxMinerva should automatically send him an email while filling in the `confirmation_sent_at: "2026-03-24T18:05:00Z"` field within "manually_excluded_tombstones.jsonl" automatically. Further, the "processed_at_time" field within the DSR record structure *will* be calculated and filled in automatically.
+
+TO DO
+Create a wrapper script as "bin/dsr", which will incorporate the command arguments as "access", as "scan" and as "delete", whereby all other arguments can be passed to either of these three scripts.  Allow the user autocompletion, and faciliate as `dsr help` command.  Make sure that `dsr scan` advises user about the possibility of running `dsr delete` for any given "internal_id" or "from" (email address). Advise the user to do this is a one-shot process.  Enforce this within "bin/dsr_delete".  Make sure that a `dsr access` cannot occur by the same "internal_id" or "from" field within a 24 hour period, i.e. within 24 hours from the value of the "processed_at_time" field of the JSONL entry with this particular "internal_id" or "from" field. 
+
+TO DO
+Think about unit testing of `dsr delete` to prove that it works.  Create these unit tests within the repo.
+
+Implement a way to query the jsonl data structure of "manually_excluded_tombstones.jsonl", via "bin/dsr_grep", which will list an readable output on STDOUT which can be narrowed down to fewer results depending upon whether the options as --dsr_id, --dsr_type, --scope, --value_of_deleted_item, --email_of_dsr_requestor, --requestor_type, --jurisdiction, etc, are used.  
+
+Thus, we want to have `bin/dsr_grep --scope "from" --value_of_deleted_item bob@456.com` to produce output just relating to this user's email address.
+
+TO DO 
+Remember to save a read-only (non appendable) copy of the "manually_excluded_tombstones.jsonl", with a unique name, in the same directory as where the new LoRA layer will reside, so we can query it to infer "This particular LoRA (reference name) was trained after DSR removed X, Y, Z", although the output from "bin/dsr_scan.rb" anf the output from "bin/dsr_grep.rb" won't be significantly different in appearance than before.
+
+TO DO 
+Facilitate the passing of an `--input particular_lora_ reference_name` option from "bin/dsr" to "bin/dsr_scan" and "bin/dsr_grep", but *not* to "bin/dsr_access", nor "bin/dsr_delete" so that the state of the DSRs associated with this particular LoRA adapter, when this adapter was trained, can be referenced.  
+
+TO DO. Ensure that a `bin/dsr_delete.rb --scope internal_id --value_of_deleted_item abc-123` when completed, will result in "manually_excluded_tombstones.jsonl" receiving appended (newer) entries with all the "internal_id"s pertaining to this particular DSR request having been listed (for omission from LoRA training, Vector DB building and KG creation), and that `bin/dsr_delete.rb --scope from --value_of_deleted_item joe@bloggs.com` will similarly result in its inclusion within the file as "manually_excluded_tombstones.jsonl". 
 
 ### Updates to "train.jsonl", "val.jsonl", and "test.jsonl" 
-When you build KG with newer incoming emails, you ought to have materialized all three sets : "train.jsonl", "val.jsonl" and "test.jsonl" in order to have absorbed new emails from existing cohorts.  You will have rematerialized.  The newer sets will incorporate any DSR deletion requests as metadata which these DSRs have tombstoned within the manifest file as "expanded_DSR_exclusions_manifest.jsonl", and these will not become included within the newer jsonl pool/set-files which are output from "bin/window_maker.rb".  But while you are at it, you might as well ingest and digest first (i.e. run "bin/mbox_pre-parser.rb" and "bin/splitter.rb") in order to update the "assigments.jsonl" file with the latest emails' metadata, for KG training.  An even better approach would be to run RAG building and KG creation upon a weekly cadence (say every Monday at 02:00 hours) so that after the DSR deletion request has become processed, it will only remain served for a maximum of 7 days before it doesn't get served.  Stipulate this within your Service Level Agreement.
+When you pass the data from newer incoming emails to the stage as pre-LoRA training you will have materialized all three sets as "train.jsonl", as "val.jsonl" and as "test.jsonl", in order to have absorbed new emails from existing cohorts, after having run "bin/mbox_pre-parser.rb" in order to ingest the pre-parsed data from the most recently committed mboxes.  You will have rematerialized during the phase as digestion.  The newer sets will have ommitted to be included, any DSR deletion requests as metadata which all the previously received DSRs have tombstoned within the manifest file as "manually_excluded_tombstones.jsonl". These will not have become included within the newer jsonl pool/set files which are output from "bin/splitter.rb".   
+
+A good approach would be to run Vector DB (database) rebuilding and KG recreation upon a weekly cadence (say every Monday at 02:00 hours) so that after any DSR deletion request has become completed after being received, it will only remain served for a maximum of 7 days before it doesn't get served.  Stipulate this within your Service Level Agreement.
 
 ### What about LoRA training?
-You want all three splits (train, val, and test) from a present moment (as a snapshot in time) so that they are consistent.  Then you train on the new train, validate on the new val, and evaluate on the new test.  Mixing old and new splits (within time) would be messy data versioning.  This is prevented by default.  There would be no point to a `bin/spliter.rb --train` as we ought to retrain the LoRA adapters to fit atop the large language model after also updating train/val/test sets within the manifest file as "assignments.jsonl".  "val.jsonl" and "test.jsonl" to the same `--pin` value too. 
+You want all three splits (train, val, and test) from a present moment (as a snapshot in time) so that they are consistent.  Then you train on the new train, validate on the new val, and evaluate on the new test.  Mixing old and new splits (within time) would be messy data versioning. There would be no point to a `bin/splitter.rb --train`, as we ought to retrain the LoRA adapters to fit atop the large language model, after updating "train.jsonl" *and* "val.jsonl" *and* "test.jsonl", from the manifest file as "assignments.jsonl" by running `bin/splitter.rb`. `bin/splitter.rb --train` is prevented by default. 
 
-TO DO.  Rewrite "bin/splitter.rb" entirely so that it will no longer materialize any pool/set files at all, and thus remove the possibility of --materialize from bin/splitter.rb
+TO DO.  Rewrite "bin/splitter.rb" so that the option as --materialize is removed, and is implictly assumed. 
 
 ## What is spot-checking?  
 Spot checking means opening a sample of these email-bodies to check that these emails are not just scrambled gibberish, or full of technical junk, that would confuse the LLM (large language model) during the training of the LoRA adapters, which will be applied to, and sit atop, of it. In more technical language, spot checking is the process of verifying schema conformance, the encoding integrity, and the examination of tokenisation edge cases. 
 
+## Tell me about "bin/spot_checker.rb".
+This command, by default, will output the first 10 email bodies to STDOUT, but the `-N` option will enable this number of output email-bodies to be varied. Additionally the `--output myfile` option will make the output be written to the file as "myfile", instead of STDOUT. It is within the script as "bin/spot_checker.rb" that the field as "mbox_processed_at" from the shard files (output at ingest by the file as "bin/mbox_pre-parser.rb") may be used.  Thus `spot_checker.rb --processed_on_and_after 2026-02-07` will list the email-bodies which are processed on the date as 7th February 2026, and after, that data ; whereas  `spot_checker.rb --processed-before 2026-02-05` will list those email-bodies which are processed on, or before, 5th February 2026 ; and `spot_checker.rb --processed-at 2026-02-06` will filter into the list every email which was on a corpus which was processed at 7th February 2026. Further, the granularity of the searches can be made more fine by the use of the options as `--from ted@abc.com`, `--to joan@xyz.com`, `--cc wendy@jhk.com luke@pqr.com`, `--reply_to_email_address stuart@bnm.com` , `--reply_to_this_email_address_instead jane@poq.com`, `--subject 'fluffy kittens'`. By default, "bin/spot_checker.rb" will filter out all messages which have been tombstoned within the file as "manually_excluded_tombstones.jsonl", but this filter can be lifted to include all emails whether tombstoned or not, whereby the tombstoned "message_body"s will appear in red with a caption informing the user that they have been tombstoned. 
+
 ## What is an epoch?
-When training a model's LoRA adapter, an epoch is one full pass through the scrubbed and debribbed email-bodies which are attributed to the train set (within the "assignments.jsonl" manifest file).  Mid-epoch means pausing part-way to evaluate against "val.jsonl" to check loss curves. 
+When training a model's LoRA adapter, an epoch is one full pass through the scrubbed and de-cribbed email-bodies which are attributed to the train set (within the "assignments.jsonl" manifest file).  Mid-epoch means pausing part-way to evaluate against "val.jsonl" to check loss curves. So that we will not be dynamically scrubbing and de-cribbing the "message_body" in every pass through the epoch, we aim to store in memory this intermediate result from pre-LoRA training, which will occur upon the latest mboxes added to the "admission section".  Now, upon initial training of *all* the historical emails' mboxes, it is possible that memory may be exceeded.  So we need to employ some file-based cache to store on disk within the directory as `./temp` which will be deleted when the training has become finished.  Whether or not this disk-based cache is used will depend upon the use and availability of RAM.  To repeat, we want the output from pre-LoRA training to be cached in memory and upon disk : RAM first, then spill to disk. The contents of this cache will be PII-scrubbed (without personally identifiable information) and boilerplate-decribbed (which is the removal of repeated patterns at relevant locations between threads).  The contents of this cache will be emails formatted into the Alpaca format for LoRA training.  The cache is purely an I/O optimization between epochs, not a GDPR surface, as we will not be processing GDPR requests between epochs.
 
 ## What about updates to "train.jsonl", "val.jsonl", and "test.json"?
-Here, "bin/window_maker.rb" is making updates to this metadata, from the manifest file as "assignments.jsonl", for the purposes of creating Knowledge-Graphs (which requires windowing of emails within threads, whereas RAG does not). We want RAG (retrieval augmentation generation), and KG (Knowledge-Graphs), to also pay attention to newer emails and DSR requests. These files as "train.jsonl", "val.jsonl", and "test.json", should be updated upon a fixed cadence which will incorporate newer corpora of emails ; and this recreation of these pool/set files should exclude all the DSR deletion requests we have so far received, at this point in time, so that email bodies, and other metadata pertaining to them, won't become served. 
+Here, "bin/splitter.rb" is making updates to this metadata, from the manifest file as "assignments.jsonl", for the purposes of updating the training set which will be passed to pre-LoRA training upon a fixed cadence, say every 3 months, or every 6 months, which will incorporate newer corpora of emails ; and this recreation of these pool/set files should exclude all the DSR deletion requests we have so far received, at this point in time, so that corresponding email bodies, won't become served. 
 
-RAG is a later indexing system, which we intend will have good performance metrics, and which will utilize our LoRA adapter : where the LoRA adapter is the latest model which excludes the tombstoned DSRed data.  
+RAG is a later indexing system, which we intend will have good performance metrics, and which will utilize our LoRA adapter, which will sit atop the LLM : whereby the LoRA adapter is the latest model, which include the latest email-bodies, and excludes the tombstoned DSR-ed data. 
 
-Training is the training of the LoRA adapter itself.
+To creating Knowledge-Graphs requires windowing of emails within threads, whereas building the Vector DB does not. We want RAG (retrieval augmentation generation), which consists of the Vector DB and KG (Knowledge-Graphs), to pay attention also to newer emails and DSR requests. "bin/splitter.rb" should be run upon a regular cadence, say, wekly, whereby these files as "train.jsonl", "val.jsonl", and "test.json", for passing to pre-LoRA training, will be rematerializes also.  These pool files are not relevant for Vector and KG, and do not these do not appear with the pipelines for Vector, nor KG either.
+ 
+Training is the training to the LoRA adapter itself.
 
-To reiterate, KG requires the materialized pool/set files (as these include windowing), but RAG does not.
+To reiterate, pre-LoRA training requires the materialized pool/set files (which *don't* include windowing). Vector does not require or utilize the materialized pool/set files. Neither does KG. RAG is the combination of Vector and KG.
 
 ## What if loss spikes (perplexity diverges upwards) mid-epoch?
 Then Houston we have a problem.  So we do spot-checking to examine whether the issue is upstream data corruption (malformed headers, encoding rot), or hyperparameter misconfiguration, or genuine distribution drift from production traffic.
 
 ## What ought I to do if when I spot-check, I find an offending email body? 
-We have a separate append-only "manual_exclusions_blacklist.jsonl" containing lines which contain "internal_id", "reason", "excluded_at", "excluded_by" ; and we also have a separate "sender_blocklist.jsonl" along with this, which has one entry per banned address:
+In addition to our append-only "manually_excluded_tombstones.jsonl" which records DSRs upon the fields as "internal_id" (specific messages), and "from" (email-address), we also have a separate "spotcheck_manual_exclusions.jsonl" along with this, which has one entry per banned "from" address, or banned "internal_id". Its schema is as: 
 ```jsonl
-{"from": "spammer@bad.com", "reason": "content quality", "blocked_at": "2026-03-29T01:45:00Z"}
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "review_vetoes.jsonl - human spot-check exclusions",
+  "type": "object",
+  "required": ["internal_id", "scope", "reason", "vetoed_at", "vetoed_by"],
+  "properties": {
+    "internal_id": {
+      "type": "string",
+      "description": "SHA256 Primary Key of the message"
+    },
+    "scope": {
+      "type": "string",
+      "enum": ["message", "sender"],
+      "description": "message = single email, sender = whole account"
+    },
+    "value": {
+      "type": ["string", "null"],
+      "description": "sender email when scope is sender, null for message-level"
+    },
+    "reason": {
+      "type": "string",
+      "enum": ["off_topic", "low_signal", "pii_leak", "quality"],
+      "description": "why the veto was issued"
+    },
+    "vetoed_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO8601 timestamp of the decision"
+    },
+    "vetoed_by": {
+      "type": "string",
+      "description": "reviewer identifier for audit trail"
+    },
+    "notes": {
+      "type": ["string", "null"],
+      "description": "optional free-text context"
+    }
+  },
+  "if": { "properties": { "scope": { "const": "sender" } } },
+  "then": { "properties": { "value": { "type": "string", "pattern": "^[a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z]{2,}$" } }, "required": ["value"] },
+  "else": { "properties": { "value": { "const": null } } }
+}
 ```
-So then my filter logic for training, KG, and RAG becomes : skip if `internal_id IN expanded_DSR_exclusions_manifest.jsonl` OR `internal_id IN manual_exclusions_blacklist.jsonl` OR `sender_address IN sender_blacklist.jsonl`. 
+Here, "low-signal" means messages with no meaningful content for training, such as "thanks!", "sounds good", auto-replies, "I'm out of the office", meeting invites, calendar notifications. These are technically valid emails but they teach the model nothing useful. This is different than "off-topic" (wrong subject matter), and quality (substantial but poor content or garbage).
 
-I will keep the manifest file as "expanded_DSR_exclusions_manifest.jsonl", and the file as "manual_exclusions_blacklist.jsonl", and the file as "sender_blacklist.jsonl", within the directory as `./input_files/`, which is the same directory than where I also keep the append-to files as "manifest_of_inputted_mboxes.jsonl", and also "generic_DSR_record_manifest.jsonl" file : which keeps a master record (not expanded to individual "internal_id"s) of what dsr got submitted when, and when it became processed.
+A couple of rows within this file as "spotcheck_exclusion.txt" might look like:
+```jsonl
+{ "internal_id": "a3f2b8c1d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1", "scope": "message", "value": null, "reason": "low_signal", "vetoed_at": "2026-04-01T10:30:00Z", "vetoed_by": "reviewer-07", "notes": "Auto-reply, no content" }
 
-TO DO. implement a "bin/manual_blacklist.rb" file such that `manual_blacklist.rb internal_id abc123fgh` will blacklist the "internal_id" as "abc123fgh" within the file as "manual_exclusions_blacklist.jsonl" ; while a `manual_blacklist.rb from spammer@bad.com` will blacklist "spammer@bad.com" within the file as "sender_blacklist.jsonl".
+{ "internal_id": "b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5", "scope": "sender", "value": "noreply@company.com", "reason": "off_topic", "vetoed_at": "2026-04-01T10:32:00Z", "vetoed_by": "reviewer-07", "notes": "Marketing blasts, not relevant to training" }
+```
+
+So then, my filter logic for training, KG, and RAG becomes : skip if `internal_id IN manually_excluded_tombstones.jsonl` OR `sender_address IN manually_excluded_tombstones.jsonl` OR `internal_id IN spotcheck_manual_exclusions.jsonl` OR `sender_address IN spotcheck_manual_exclusions.jsonl`.  This is the same logic which "bin/splitter.rb" utilizes when it is outputting the filtered pool/set files.  
+
+I will keep the manifest file as "manually_excluded_tombstones.jsonl" within the directory as `./input_files/`, which is the same directory than where I also keep the append-to files as "manifest_of_committed_mboxes.jsonl", because I may want to be able to regenerate the content of these mboxes and their DSRs via a backup of this directory on a different system.  Because the file as "spotcheck_manual_exclusions.jsonl" keeps a record (a state) of the decisions which were made by a data curating individual we wish also to keep this file within the same directory as `./input_files/`.
+
+TO DO. implement a "bin/spotcheck.rb" file as a wrapper to "bin/spotcheck_exclude_message" and "bin/spotcheck_exclude_sender". Thus `spotcheck exclude sender spammer@bad.com` will ask a load of questions if those options are not included, and so will `spotcheck exclude message b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5`
+
+## Is there any way to automate the spot checking of email bodies?
+Please note that this is *not* a form of [labelling](#what-would-label-drift-prior-to-training-be). We could classify low-signal messages like "thanks!" or auto-replies, flag outliers by perplexity, and route only the flagged subset to the human reviewer. Thus we are automating the triage, not the verdict. The whole point of spot checking is a human in the loop.  
+
+To explain more about how to flag outliers by perplexity when automating via an LLM the spot checking of email bodies, run each email body through your base LLM and measure token-level perplexity (average negative log of the likelihood). Emails the model finds "surprising", with an unusually high perplexity, are likely weird : garbled encoding, foreign language mixed in, copy-pasted legal boilerplate, spam that slipped through, or novel jargon-heavy content.  Unusually low perplexity flags the opposite problem : boilerplate, auto-replies, "thanks" emails (your low signal category). We could set threshold on both tails of the distribution and route flagged messages for human review.  In our case we are going to deal with messages with too low perplexity in LoRA training, via PII-stripping, boilerplate-stripping (decribbing), and fuzzy deduplication of inter-thread similarities. This will account for the low end of the scale, of which messages will be too numerous to be manually decided upon. For the other end, to find bizarre symbols or other garbage which will confuse LoRA, I think that this LLM automated triage is a good idea.
+
+TO DO. Think of how to hit Ollama container and when this has been thought of, implement a "bin/perplexity_catcher.rb" to output a triage file at a stage called SPOTCHECKING which is run before ingest ("bin/mbox_pre-parser.rb"), 
 
 ## Tell me about DSRs (Data Subject Requests)
-DSR deletion requests *don't* get removed from the output files from "bin/mbox_pre-parser.rb" (the "part-00001.jsonl" files, etc), as that would add an extra layer of complexity, and also it would break our record of what data got pre-processed from the mbox at this stage, which is useful to retain for later analysis, as it will retain the data which the DSR may have deleted the metadata of, in the output from "bin/splitter.rb" : the append-only "assignments.jsonl" file.  We don't break immutability within our immutable manifest file as "assignments.jsonl".
+DSR deletion requests *don't* get removed from the output files from "bin/mbox_pre-parser.rb" (the "./until_2026-03-24T18:47:00Z_000001/part-000001.jsonl" files, etc), as that would add an extra layer of complexity, and also it would break our record of what data got pre-processed from the mbox at this stage, which is useful to retain for later analysis, as it will retain the data which the DSR may have deleted the metadata of, in the output from "bin/splitter.rb" : the append-only "assignments.jsonl" file.  We don't break immutability within our immutable manifest file as "assignments.jsonl", because we may need to keep it for a forensic audit trail if a law enforcement official request this.
 
-Rather, upon DSRs deletion requests, we marking the "internal_id"s which are tombstoned as tombstoned by virtue of the fact that they are appearing within the manifest file as "expanded_DSR_exclusions_manifest.jsonl", and then we will be omitting such tombstoned data from our jsonl set files (train/val/test) when we run "bin/window_maker.rb" (and thus also subsequently KG creation), and we will be omitting such tombstoned data also when we build RAG, and also when we train LoRA. 
+Rather, upon DSRs deletion requests, we are marking the "internal_id"s, which are tombstoned, as tombstoned, by virtue of the fact that they are appearing within the manifest file as "manually_excluded_tombstones.jsonl", and then we will be omitting such tombstoned data from our jsonl set files (train/val/test) when we run "bin/window_maker.rb" (and thus also subsequently KG creation), and we will be omitting such tombstoned data also when we build RAG, and also when we train LoRA.  When we train LoRA, we pass the files as "train.jsonl", "val.jsonl", and "test.jsonl" to the stage as pre-LoRA training.  These pool/set files were output from "bin/splitter.rb in one-pass, and the data corresponding to rows from "assignments.jsonl" which have matching "internal_id"s or "from" (sender-addresses) have been ommitted from these pool files.  
 
-We may have a possible legal obligations to remove data from the data sets for KG, and to *not* serve deleted users' data in RAG, and *not* include this data within LoRA training, such that we will *not* retrain the model upon a user's "request to be forgotten", and we will *not* reference this individual within any RAG (retrieval augmentation system), which may subsequently use this model at inference time.  As RAG will *not* be using the output set files from "bin/window_maker.rb", when chunking before recreating the embedded indexes within its vector database, it (RAG chunking) must apply the same exclusion list filter that "bin/window_maker.rb" uses also. 
+We may have a possible legal obligations to remove data from the data sets for KG, and to *not* serve deleted users' data from the Vector DB, and *not* include this data within LoRA training, such that we will *not* retrain the model upon a user's "request to be forgotten", and we will *not* reference this individual within any RAG (retrieval augmentation system), which may subsequently use this model at inference time.  As our Vector DB will *not* be using the output set files from "bin/window_maker.rb", when chunking before recreating the embedded indexes within its vector database, it (chunking for Vector) must apply the same exclusion list filter logic that "bin/window_maker.rb" uses also, and so does "bin/splitter.rb" when filtering the rows from "assignments.jsonl" to create the pool/set rematerialized files. 
 
-It may be company policy of the enterprise which uses this software, to re-embed the indexes within the vector DB (database) for RAG, and also to recreate the KG from scratch, upon a fixed cadence, say every week at Sunday at 03:00 hours, incorporating every email message which has been received up until that particular Sunday at 02:00 hours, and also incorporating every DSRs which has been sucessfully processed up until that particular Sunday at 02:00 hours ; but to retrain LoRA upon a longer cadence, say every 3 months. For the purposes of spot-checking, it is recommended that LoRA training should be supervised by a competent computer scientist, or other kind of information technology expert, in case perplexity spikes mid-epoch, and a decision requiring manual intervention needs to be made.
+It may be company policy of the enterprise which uses this software, to re-embed the indexes within the vector DB (database) for RAG, and also to recreate the KG from scratch, upon a fixed cadence, say, every week at Sunday at 03:00 hours, incorporating every email message which has been received up until that particular Sunday at 02:00 hours, and also incorporating every DSRs which has been sucessfully processed up until that particular Sunday at 02:00 hours ; but to retrain LoRA upon a longer cadence, say, every 3 months. 
 
-I consider this to be a clean way in which to work : the take-down of user data upon receipt of an individual DSR requests within a reasonable period of time, via a complete rebuild of RAG and KG, whereas a retrain done to LoRA may be happening upon a longer fixed cadence, say every 3 months, for example, because there is nothing to stop us doing this complete rebuild of RAG, and KG, upon a weekly cadence, without a retrain to LoRA.
+For the purposes of spot-checking, it is recommended that LoRA training should be supervised by a competent computer scientist, or other kind of information technology expert, in case perplexity spikes mid-epoch, and a decision requiring manual intervention needs to be made. I consider this to be a clean way in which to work : the take-down of user data upon receipt of an individual DSR requests within a reasonable period of time, via a complete rebuild of RAG and KG, whereas a retrain done to LoRA may be happening upon a longer fixed cadence, say every 3 months, for example, because there is nothing to stop us doing this complete rebuild of Vector, and KG, upon a weekly cadence, without a retrain to LoRA.
 
 The training of each LoRA adapter will thus not be reproducible, as we MUST NOT use the data in training for which a DSR deletion request has been enacted *after* this DSR request has been received. Thus we won't be able to retrain including it ; and thus we may wish to keep each LoRA adapter itself after it has become no longer in use for our records if this is deemed useful, though it might not be deemed useful, as, so I would be made aware, an AI LLM (artificially intelligent large language models) at inference time uses "temperature", which introduces randomness through weighted sampling ; and fixing this to zero, while keeping the seed, the hardware, and the batching, all constant, is too much of an advanced computer science project for an enterprise whose purpose is merely to read an archived mbox!
 
-Note that DSR requests lead to quarantined messages at the level of metadata. This metadata becomes marked as tombstoned within the manifest file, and omitted from a rematerialisation of the pools/sets. This process of quarantining has nothing to do with deduplication of messages, which happens at ingest stage ; as the output shard files from "bin/mbox_pre-parser.rb" have no concept of sets, and so this deduplication of identical email messages, which happens at the ingest stage, will have the consequence as that both between, and within, threads, no duplication of identical messages will happen at digest time, or later. Nor does the quarantining of email messages due to DSR requests have anything to do with the removal of messages which contain attachments : the detachment of which happens at ingest stage ("bin/mbox_pre-parser.rb") if the email does have an attachment. Neither does DSR quarantining have anything to do with what we are doing at ingest time to drop excessively long emails, so that the training done to LoRA won't learn to produce cut-off replies.  Neither does this quarantining due to DSR requests have anything to do with fuzzy dedupe done at pre-LoRA training time, which checks for contamination of email-body content between threads, and hence between sets.  Fuzzy dedupe happens at the time of just prior than the training of the LoRA adapter, not at ingest time (mbox_pre-parser.rb), nor at digest time (splitter.rb).
+Note that DSR requests lead to quarantined messages at the level of metadata. This metadata becomes marked as tombstoned within the manifest file, and omitted from a rematerialisation of the pools/sets. This process of quarantining has nothing to do with deduplication of messages, which happens at ingest stage ; as the output shard files from "bin/mbox_pre-parser.rb" have no concept of sets, and so this deduplication of identical email messages, which happens at the ingest stage, will have the consequence as that both between, and within, threads, no duplication of identical messages from within mboxes, will happen at digest time, or later. Nor does the quarantining of email messages due to DSR requests have anything to do with the removal of messages which contain attachments : the detachment of which happens at ingest stage ("bin/mbox_pre-parser.rb") if the email does have an attachment. Neither does DSR quarantining have anything to do with what we are doing at ingest time to drop excessively long emails, so that the training done to LoRA won't learn to produce cut-off replies.  Neither does this quarantining due to DSR requests have anything to do with fuzzy dedupe done at pre-LoRA training time, which checks for contamination of email-body content between threads, and hence between sets.  Fuzzy dedupe happens at the time of just prior than the training of the LoRA adapter, not at ingest time (mbox_pre-parser.rb), nor at digest time (splitter.rb).
 
 TO DO.  implement this detachment of email attachments at ingest stage (bin/mbox_pre-parser.rb).
 
-When a DSR deletion request comes in, we must tombstone the relevant "internal_id"s which are affected by this DSR deletion request, in the immutable manifest file as "expanded_DSR_exclusions_manifest.jsonl".
+When a DSR deletion request comes in, we must tombstone the relevant "internal_id"s which are affected by this DSR deletion request, in the immutable manifest file as "manually_excluded_tombstones.jsonl".
 
-The file as "bin/window_maker.rb" is the CLI (command line interface) we should invoke to rematerialize all three splits from the immutable manifest file as "assignments.jsonl", which will trigger a clean rematerialization of "train.jsonl" and "val.jsonl" and "test.jsonl", including all emails prior to the particular date when the latest corpus of email mbox data was ingested via "bin/mbox_pre-parser.rb" ; and thus the output from "bin/window_maker.rb" will exclude all "internal_id"s which are tombstoned from the file as "expanded_DSR_exclusions_manifest.jsonl", and  all "internal_id"s which are tombstoned within the file as "manual_exclusions_blacklist.jsonl", and all the "from:" sender-addresses which are tombstoned within the file as "sender_blacklist.jsonl". Thus "bin/mbox_pre-parser.rb" will have rematerialized "train.jsonl", "val.jsonl", and "test.jsonl" pool/set files in a way which won't change the pre-existing composition of what already got put into "train.jsonl", "val.jsonl", and "test.jsonl", beyond DSR effects, but will update "train.jsonl", "val", and "test", up to and including emails ingested by "bin/mbox_pre-parser.rb", and processed (digested) by "bin/splitter.rb".
+When we invoke the file as "bin/splitter.rb", this will output new metadata to the file as "assignments.jsonl", and "bin/splitter.rb" will trigger a clean rematerialization of "train.jsonl" and "val.jsonl" and "test.jsonl", including all emails prior to the particular date when the latest corpus of email mbox data was ingested, via "bin/mbox_pre-parser.rb" ; and the output from "bin/splitter.rb", will exclude all "internal_id"s which are tombstoned from the file as "manually_excluded_tombstones.jsonl" (`internal_id IN manually_excluded_tombstones.jsonl`), OR will exclude all `sender_address IN manually_excluded_tombstones.jsonl` OR `internal_id IN spotcheck_manual_exclusions.jsonl` OR `sender_address IN spotcheck_manual_exclusions.jsonl`.  
+
+Thus after "bin/mbox_pre-parser.rb" has been run, `splitter.rb` will have rematerialized "train.jsonl", "val.jsonl", and "test.jsonl" pool/set files in a way which won't have changed the pre-existing composition of what already got put into "train.jsonl", "val.jsonl", and "test.jsonl", beyond DSR effects, yet will update "train.jsonl", "val.jsonl", and "test.jsonl", up to, and including, emails' metadata ingested by "bin/mbox_pre-parser.rb", which was afterwards processed (digested) by "bin/splitter.rb".
 
 ## How does my split data grow?
-If I do a `splitter.rb`, in January 2025 and a year later I do a `splitter.rb` in January 2026, then the possibility exists that a new thread from 2025-04 may enter "train.jsonl", "test.jsonl" or "val.jsonl", as we are specifically expanding the "Time Horizon" to include everything up to that new date ; whereby the April 2025 thread transitions from being an "ignored future data" (in the 2025 context) to being "eligible historical data" (in the 2026 context), and will enter the lottery as to where it lands based upon its hash, and your split ratio.  When emails, say, from a January 2025 thread, arrive within your latest email cohort (as an mbox), say, in January 2026, this email will still enter the same set (train/val/test) than the email thread from January 2025.  We will want the older emails, within existing threads, to receive the latest email updates to them, for : LoRA training, for KG creation, and for RAG chunking and embedding.  
-
+If I do a `splitter.rb`, in January 2025, and a year later I do a `splitter.rb` in January 2026, then the possibility exists that a new thread from 2025-04 may enter "train.jsonl", "test.jsonl" or "val.jsonl", as we are specifically expanding the "Time Horizon" to include everything up to that new date ; whereby the April 2025 thread transitions from being an "ignored future data" (in the 2025 context) to being "eligible historical data" (in the 2026 context), and will enter the lottery as to where it lands based upon its hash, and your split ratio.  When emails, say, from a January 2025 thread, arrive within your latest email cohort (as an mbox), say, in January 2026, this email will still enter the same set (train/val/test) than the email thread from January 2025.  We will want the older emails, within existing threads, to receive the latest email updates to them, for LoRA training, for KG creation, and for RAG chunking and embedding.  
 
 ## What is "generalisation"? 
-In training LoRA, generalisation is the ability to say that the model has not merely memorized and regurgitated verbatim the patterns (grammar, intent structure, reasoning) from "train.jsonl", and these updates, to our email-body's data, assists towards that end, and more data means that the model has a better ability to make generalisations. Later arrivals, within a later corpus, each arrive within their deterministic destination within one of these sets/pools, and this gives us the option to retrain the LoRA adapters, at a later time,, with their inclusion of these email-bodies implied, in order to improve the model's quality, within the existing time boundary as now : which progresses with each receiving to each corpus. This shifts the model's knowledge horizon into a new time period beyond the older one.
+In training LoRA, generalisation is the ability to say that the model has not merely memorized and regurgitated verbatim the patterns (grammar, intent structure, reasoning) from the `message_body`s which are referenced by "train.jsonl" ; and these updates, from our email-body's data, assists towards that end as more data means that the model has a better ability to make generalisations. Later arrivals, within a later corpus, each arrive within their deterministic destination within one of these sets/pools, and this gives us the option to retrain the LoRA adapters, at a later time, with the inclusion to these email-bodies implied, in order to improve the model's quality, within the existing time boundary as now : which progresses with the receiving of each corpus. This shifts the model's knowledge horizon into a new time period beyond the older one.
 
-What will also occur, is that potentially later, but newer, conversational threads than those which the previous time boundary inferred (i.e. with newer email thread_ids), will go into the manifest file as "assignments.jsonl" by our train/val/test probability split of 80/10/10 ; and those newer conversations, will end up in exclusively one of the pool/set files as "train.jsonl", "val.jsonl" and "test.jsonl" which are output by "bin/window_maker.rb".
+What will also occur, is that potentially later, but newer, conversational threads than those which the previous time boundary inferred (i.e. with newer email thread_ids), will go into the manifest file as "assignments.jsonl" by our train/val/test probability split of 80/10/10 ; and those newer conversations, will end up in exclusively one of the pool/set files as "train.jsonl", "val.jsonl" and "test.jsonl", which are output by "bin/splitter.rb".
 
+## What is a DPR Vector DB?
+The definition of a **DPR Vector DB** is that it is a specialized vector storage system designed to support DPR : a technique for efficiently retrieving semantically relevant text passages in response to user queries. It combines:
+- **Dense Vector Embeddings** : smart rerievel by understanding meaning, not just words.
+- **Approximate Nearest Neighbour (ANN) search** for fast efficient retrieval of top-*k* passages for a given query vector.  Uses algorithms like **HNSW**, **IVF**, or **PQ** for scalability.
+- **Metadata integration** to filter and rank results contextually.
 
-## Compare KG creation and DPR chunking for embedding to a vector DB, within the context of RAG.
-DPR (Dense Passage Retrieval) building involves reading the skinny "assigments.jsonl", and filtering "internal_id"s which are excluded by "expanded_DSR_exclusions_manifest.jsonl", and "internal_id"s which are blacklisted by "manual_exclusions_blacklist.jsonl", and also those "internal_id" which are associated with a "from" field from the fat shard files (which are output from "bin/mbox_pre-parser.rb"). Once we have those relevant, filtered, "internal_id"s, we use them to look up each associated email_body, and then use an LLM inference to translate this email-body, such as : 
+### Tell me about Dense Vector Embeddings
+Within a DPR Vector DB, this is a fixed-length, high-dimensional numerical representation of text (like words, sentences, or paragraphs) that captures semantic meanign reather than just syntax.
+
+### Tell me about DPR data curation.
+DPR (Dense Passage Retrieval) building *would* involve reading the `message_body`s from the shard files, and then using an LLM inference to translate this email's `message_body`, such as : 
 ```
 > > > What is the price of a cheeseburger?
 > > £3.45
@@ -268,93 +493,777 @@ into a query-passage pair, such like :
 ```jsonl
 {"query": "What does a cheeseburger cost?", "passage": "The price is £3.75"}
 ```
-How will the LLM inference which is creating the query-passage pairs cope with the alteration of the price due to inflation?  We don't want it to create conflicting pairs, so we will handle this in the following way. We use a post-pass of the relevant data, not a lookahead.  All the relevant data is contained within our shard files (which were output from "bin/mbox_pre-parser.rb"). Let us say that thread_id "abc" has 5 emails.  Email 1 says "cheeseburger £3.45", and email 4 says "now £3.75". The pipeline to be used becomes
-- (1)  Parse each "email_body" with the associated "thread_id" and "date" into JSONL.
-- (2)  Group each of these JSONL entries by "thread_id".
-- (3)  Sort each group by date.
-- (4)  For DPR passage selection, walk the thread, and when two emails answer the same question, keep the later one.
+How could the LLM inference which is creating these "query-passage pairs" cope with the alteration of the price due to inflation, if we should not want it to create conflicting pairs? Well, we could handle this in the following way. We could use a post-pass of the relevant data, not a lookahead.  All the relevant data is contained within our shard files (which were output from "bin/mbox_pre-parser.rb"). Let us say that thread_id "abc" has 5 emails.  Email 1 says "cheeseburger £3.45", and email 4 says "now £3.75". The hypothetical pipeline is purely a hypothetical one, which I shall not elaborate upon because I will be using a non-DPR Vector DB, and hence doing none of this within this project.  Needless to say, the first pass parses, and the second pass enriches our knowledge of the full corpus.  The DPR indexer is a 2-pass consumer.
 
-Thus the first pass parses, and the second pass enriches our knowledge of the full corpus.  The DPR indexer is a 2-pass consumer.
+### Tell me about Metadata Integration.
+By metadata integration we mean that each passage/query entry includes structued metadata, such as:
+```json
+{
+  "id":"passage_123",
+  "vector": [0.1, -0.5, ..., 0.3], // DPR embedding
+  "text": "£3.75",
+  "metadata": {
+    "query": "what is the price of fries?",
+    "timestamp": "2024-05-20",
+    "source": "email3",
+    "type": "answer",
+    "is_latest": true
+  }
+}
+```
 
-Chunking for DPR building is purely based upon each emails "internal_id" and its "email_body".  During RAG retrieval, RRF (reciprocal rank fusion) also receives the "internal_id"s passed to it from the output from KG retrieval, in addition to those from BM25.  This is the hybrid approach.  The email-body's content (which the DPR vector database is trained upon), which is associated with these "internal_id"s, originally came from the shard files which have been output from "bin/mbox_pre-parser.rb", and now this email_body data has been built in to DPR, in association with the "internal_id" associated with it. The RAG agent will have the capability as to look up these "internal_id"s within these fat shard file, and *this* will confer the ability to those resource attachments' metadata, which were associated with the email message's "internal_id" metadata, during ingest ; such that, for example, within RAG, a subsequent semantic similarity search of the email body's embedded text chunks within DPR, may also link the semantic meaning of the email's body with these "internal_id"s to this "attachments" metadata from the fat shard files. RRF produces a single merged scored list, and subsequent top-k is simply the slicing to the first K from that sorted list.
+### Tell me about Query processing.
+- 1. **Query Encoding**: The User Query (e.g. "what is the price of fries?") is embedded into a vector.
+- 2. **Vector Search**: The query vector is compared against all passage vectors in the database using ANN.
+- 3. **Reranking (Optional)**: Top-*k* results are passed to a cross-encoder (e.g. another BERT model) for fine-grained scoring.
+- 4. **Metadata filtering**: Results are filtered by metadata (e.g. `is_latest=true`, `timestamp > 2024-01-01`)
 
-KG (Knowledge-Graphs) creation requires us to have *windowed* metadata from all three sets/pools (which are output from "bin/window_maker.rb"). We may want to have the latest data from not more than 7 days ago, included within KG creation.  
+### Tell me about data-inputting to our DPR Vector DB.
+This will occur in three stages:
+- (1) **Chunking**: Long documents are split into smaller passages (e.g. sentences or paragraphs)
+- (2) **Embedding**: Each passage is encoded into a dense vector using DPR bi-encoder.
+- (3) **Metadata attachment**: Contextual data (e.g. timestamp, source) is stored alongside the vector.
 
-KG will read the **pool/set** files in order to establish the windowing required for Knowledge-Graph creation ; the other associated metadata for KG (including the metadata for attachments) will be read from the shard files.  This means that we can make the pool/set files output from "bin/window_maker.rb" super-skinny, whereby they only contain the metadata necessary for windowing, and nothing more.  This is in obedience to the DRY (don't repeat yourself) principle of data in general.  KG does *not* contain the email bodies.  The email bodies are used by BM25, and DPR (a semantic search), as well as to be used during a retrain done to LoRA. 
+## DPR Vector DB building.
+DPR Vector DB is *not* constrained by the embedding model's max tokens (e.g. ~256 tokens for all-MiniLM-L6-v2, or ~8191 tokens for OpenAI text-embedding-3-small), because it operates purely upon vector embeddings (fixed-size dense vectors, typically 768d or 348d), and doesn't process raw text.  The embedding model (e.g. `sentence transformers/all-mpnet-base-v2`) truncates the input text to its own max token limit *before* generating embeddings, but the resulting vectors are agnostic to token length.  A "dense vector" is a fixed length numerical array (e.g. `[0.12, -0.45, 0.78, ...]`), representing semantic meaning of text/data, generated by models like `all-mpnet-base-v2`.  It is "dense" because it compresses high-dimensional meaning into a compact form.  The model processes text up to its max tokens (e.g. 512), discarding excess. This is *not* an example of chunking. It is a hard cutoff. For long texts, you would pre-split these texts into chunks (e.g. 256 tokens each) *before* embedding, where each chunk is embedded separately, resulting in multiple vectors. In order to represent the entire document by a single vector, you would either:
 
-To explain this properly, KG is queried for "Who emailed to whom? when? Within the same thread chain? With what attachments?", BM25 returns a literal non-semantic search of email-bodies and associated metadata (where a semantic search might have hallucinated), and DPR returns those "internal_id"s which list positive (with a scoring for RRF) within a semantic search, where the DPR was previously populated by an LLM having read and interpreted our email-bodies in a 2-pass read. 
+- (1) Compute the mean of all chunk vectors (e.g. `[avg(v1), avg(v2), ...]`).  This is called **Average Pooling**: it preserves a rough semantic centre, but loses fine-grained structure, or
+- (2) **Pool variants via other methods**: which include max-pooling (taking the highest-value vector per dimension), or weighted pooling (prioritizing chunks like introductions or conclusions).
 
-DPR is Dense Passage Retrieval. Instead of keyword matching (like in BM25), we encode queries and passages into dense vectors. At training time, relevant query-passage pairs are pulled together.  Irrelevant ones are pushed apart. At retrieval time you encode the query once, and then compare it against all pre-encoded passage vectors via dot product, or cosing similarity.
+These methods are lossy, but necessary for fixed-size vector storage. The context bridging chunk boundaries is ignored. Frameworks like `sentence-transformers` or `langchain` handle this automatically. 
 
-Within our hybrid retrieval from KG-DPR-BM25, we make a single pass of RRF across the outputs from DPR, BM25 and KG (which run in parallel), which will rerank these outputs in a way which is not staged (i.e. not a prior union between BM25 and DPR before RRF with KG), because a two-stage fusion would bias the weightings. 
+For Non-DPR Vector DBs, the same principles apply. The mechanics (truncation, chunking, vector storage) are identical. The difference in *how* vectors are generated and queried.  DPR optimizes for retrieval-specific semantics ; other DBs prioritize speed or generality. Any Vector DB stores embeddings, not raw text. A Vector DB (FAISS, Pinecone, etc) which has *not* been configured to act as a DPR Vector DB, stores vectors without any retrieval-specific optimizations, and is not optimized for "textual passge retrieval".  If a DPR DB is used, then "ball-game" changes only in respect to:
+- (1) **Retrieval method**: DPR uses cross-encoders for re-ranking ; others rely solely upon cosine similarity
+- (2) **Embedding quality**: DPR's embeddings are fine-tuned for retrieval.  Generic embedding models (e.g. `text-embedding-ada-002`) might generalize poorly in comparison.
+- (3) **Update efficiency**: DPR's two-stage encoding (bi-encoder + cross-encoder) is slower but is often more accurate.
+
+A **cross-encoder** is a second-stage neural model that computes similarity between a *query* and a *candidate* passage by encoding them jointly.  It is slower than bi-encoders, like those which are used within DPRs first stage, but captures nuanced interactions (e.g. "notable physicist" vs "famous scientist").  
+
+**Re-ranking** means that after retrieving top-*k* candidates by using a bi-encoder (which is fast and approximate), a cross-encoder reorders these by recalculating scores.  This refines results but it is only applied to a small subset (e.g. top-100). 
+
+As for **DPRs fine-tuning**, The bi-encoder (first stage) is trained to align query-passage pairs into the same vector space.  This vector is *not* more fine-grained ; it is optimized for *retrieval specific semantics* (e.g. the word as "financial" can return the word as "bank", but not "river"). Generic embedding models (e.g. `text-embedding-ada-002`) lack this task-specific tuning.  By "fine-tuning" we do *not* mean a higher dimensionality.  DPRs vectors are still 768d, but their *semantic alignment* is sharper for retrieval. 
+
+Please note that the "embedding model's max tokens" is *not* an example of an LLM Input Window (where the "Lookback Horizon" of the vLLM is bounded by the maximum possible length of this Input Window, which is sometimes known in the industry as the "Context window" of the LLM). 
+
+## What is a normal (non-DPR) Vector DB used for?
+This is used fro the same job as DPR, but with a generic embedding model instead of a dual-encoder trained upon question/passage pairs. You embed your chunks with someting like OpenAI's `text-embedding-3`, or a Sentence-BERT.  You populate FAISS/Milvus/Qdrant with these vectors.  Then, at query time, you embed the user query by using the same model, and do ANN cosine/dot-product search to get top-K similar chunks.
+
+### In what format do I pass data to a non-DPR Vector DB to populate it?
+Pairs of {vector, metadata}. You embed your chunk with an embedding model, get back a float array (e.g. 768 dimensions), then insert:
+```ruby
+{
+  id: "sha256_chunk_abc...",      # your internal_id as the primary key
+  vector: [0.023, -0.41, ...],    # float array from embedding model
+  metadata: {                      # filterable payload, NOT used for ranking
+    source: "email",
+    ts: "2025-05-17T14:30:00Z",
+    sender: "wendy@frogs.com"
+  }
+}
+```
+At query time you embed the user's question with the same model, get one vector, do ANN against the vector collection, and the returned ids point back to your internal_ids for late hydration. The metadata is only for post-retrieval filtering (e.g. "only results from 2025") or display - it never affects the similarity score. 
+
+## Why a non-DPR Vector DB is more appropriate for my use case?
+This is because I wish for KG to handle all the metadata.  For example I wish my non-DPR Vector DB to be populated by a data structure as:
+```ruby
+{
+  id: "sha256_chunk_abc...",      # your internal_id as the primary key
+  vector: [0.023, -0.41, ...],    # float array from embedding model
+}
+```
+Now my Vector DB deals purely in semantics. If necessary the RAG agent ought to be able to handle the query as "List all the email message sent within 2025 which are about cats" by obtaining a list of `internal_id` candidates and then search for "about cats" semantically within vectors which are associated with this limited set (as opposed to all the vectors).  Note that this type of a query is a feedback loop which will occur *before* the main orchestration layer as query -> LLM -> BM25/KG/Vector -> top-K -> my_LoRA_LLM. 
+
+It seems to me that DPR is unnecessary, and slower, as I will want to keep the metadata out of my Vector DB, and within KG where it belongs.
+
+## Tell me about *how* we will chunk our message_body's.
+We don't want *any* overlap between the chunks for Vector embedding and indexing, because Vector doesn't need them : instead, when we are populating the non-DPR Vector DB, we treat our email corpus as one big collection of data.  We chunk each email body, and associate with each chunk this email's metadata ; then we text-embed, and store this embedded vector within a non-DPR Vector database ; and we will now have completed the Vector DB offline stage. 
+
+To have overlap between the chunks of email-bodies (associated with the same email's metadata) for Vector, is not as harmful in the same way that it would be for LoRA training (by overfitting some of the data), but it would be messy data curation, as RAG doesn't specifically learn from duplicates. This approach of having duplicates, which we reject, would bloat storage, resulting in redundant chunks being returned, eating into the top-*k* budget of the most relevantly returned raw text chunks (which *would* actually detriment our performance, and so in this sense *would* be harmful).  As a split between chunks mid-sentence is useless in both halves, I say, the correct approach is to programatically to test for a fixed size, say 0.7, of the embedding model's max tokens, which, when approached in a wall-of-text (the sender wrote 47 lines without hitting the Enter button twice in a row) chunks upon a sentence boundary near to this 70% mark of the max tokens in this case ; whilst otherwise to split upon a paragraph break. This design will incorporate having a look-ahead examination for a wall-of-text, because, just say this wall begins at the 50% mark of the max tokens (pertaining to the email body), and this wall-of-text is 70% of the size of the maximum number of the tokens for this embedding model, we want to break the wall-of-text after about the next 20% (of the size of max tokens) within the next chunk, leaving a remaining wall-of-text now of about 50% of the size of the max number of tokens for the embedding model (which is calulated by 0.7 - 0.2), and then start the next chunk (the third chunk) upon this breakpoint. We will want this look-ahead to happen iteratively for all chunks of an email's body which span multiple chunks. It is a moving window where we are aiming for the 70% size of a max token of the embedding model each time but might miss by give or take 20%. We need within this algorithm the guarantee that we will never make each chunk exceed the 90% of this max token constant.  This algorithm is a type of sliding window.
+
+TO DO.  implement this kind of a chunker.  "bin/chunker_for_vector_db"
+
+## Vector DB synopsis.
+The non-Vector DB retrieves unstructured text chunks via vector similarity. It gives us fuzzy semantic hints, such as chunks mentioning "outage", or "segfault" in response to a Vector search of the word as "crash", during GENERATION time.  Contrast this to KG (Knowledge-Graphs), which is a graph database with explicit nodes with edges for structured relationships (such as who-emailed-whom-when).  
+
+In particular, for the stage of the Vector DB online : RETRIEVAL, let's say the query is "When did Alice raise the crash issue with Bob?", then this step will be retrieval, which may well, and hopefully will be, running in parallel, asychronously, with BM25 retrieval, and KG retrieval. Recall that KG gives us the hard facts (Alice->message edges, internal_ids, thread IDs, timestamps, etc).  RAG gives us fuzzy semantic hits, based upon semantic similarity searches, which return specific `internal_id`s, and BM25 returns `internal_id`s which are returned by a textual (literal) similarity search.  All these results are passed to RRF, which after a subsequent top-K selection, and filtering of KG results with `node_type: Attachment`, OR `node_type: EmailAddress` (both to a sidecar), and a subsequent "hydration" (extracting done to the corresponding `message_body`) will be passed in a single prompt (GENERATION STAGE) via the RAG agent to the LoRA trained LLM for processing.  The User query for this to this LLM may very well be, "Show me the literal email message." This should work!  The GENERATION stage, is as to combine the System prompt, and all the chunks (Context) of the `message_body`s, and the User Query into a single prompt (the input window).  KG provides structure such as who and when ; Vector, and BM25, answer "what was said" ; and LoRA facilitates the model *how* to say it, where a vanilla model would fumble.  This is our goal!
+
+## Tell me about chunking for embedding into a vector DB for KG creation.
+Chunking for Vector DB building is purely based upon each emails `internal_id` and its `message_body`.  During RAG retrieval, RRF (reciprocal rank fusion) receives the `internal_id`s passed to it from the output from KG retrieval, in addition to those from BM25, and the Vector DB.  This is the hybrid approach.  The `message_body`s content (which the DPR vector database is trained upon), is associated with these `internal_id`s, and comes from the shard files which have been output from "bin/mbox_pre-parser.rb" ; and, during building (populating the Vector DB with embedded vectors), this `message_body`s data has been built into the Vector DB, in association with the `internal_id` from which it came. After RRF and, top-k, the RAG agent will have the capability as to look up these `internal_id`s within these fat shard file, and *this* will confer the ability to access those actual raw `message_body`s, and to access other metadata, such as "attachments", which was associated with a particular email message's `internal_id` metadata, during ingest, by "bin/mbox_pre-parser.rb" ; such that, for example, within RAG, the RAG agent may look up the metadata associated with a particular `internal_id` from the fat shard files, after having performed a semantic similarity search of the spatially organized embedded vectors within the Vector DB, and subsequently allow the user to view a read-only, savable, copy of the relevant attachments themselves.  RRF produces a single merged scored list, and subsequent top-k is simply the slicing to the first K from that sorted list.
+
+RAG processes some `internal_id`s from a semantic search within the Vector DB. These `internal_id`s refer to specific lines within a specific pre-parsed (ingested) shard file. But there exists many, possibly thousands, of shard files. So, instead of searching each one individually for this specific `internal_id`, and instead of trying to cache all these fat shard files into memory, we should form a "skinny_shard_index.jsonl" metadata file, which is written to by "bin/mbox_pre-parser.rb" at ingest time, and, which being super-skinny, contains only the metadata as:
+```jsonl
+{
+  "internal_id": "abc123",
+  "ingest_path": "./until_2026-03-24T18:47:00Z_000001/",
+  "shard_file": "part-000001.jsonl",
+  "line": 42 
+}
+```
+When the RAG agent starts up, and before it starts serving queries, we load the file as "skinny_shard_index.jsonl" into an in-memory hash once, then every retrieval call (whether from Vector, BM25, or KG) does O(1) lookups against it. Note that all three, KG, and BM25, and Vector, return "internal_id"s, so we are doing one hash lookup per hit, and then performing a seek directly to the relevant line.  This is miles better than embedding shard paths inside the vector DB, or BM25 index, which would have coupled the retrieval layer to our storage layout, and thus would have been particularly brittle. Here, index building happens at ingest time by "bin/mbox_pre-parser.rb", which produces: (1) the fat shard files, with, (2) their associated "manifest_of_ingested_mboxes.jsonl", and, (3) the stage KG metadata to a staging area upon disk. Our file as "skinny_shard_index.jsonl" is for a runtime lookup at the time of RAG retrieval, and it is also accessed during KG creation (build) time.  This file as "skinny_shard_index.jsonl" will be an append-only file, stored at the same location as the file as "manifest_of_ingested_mboxes.jsonl", which is at the location as `./pre-parsed/`.
+
+At the time of **RAG retrieval**, the Vector DB, KG, and BM25, return relevant "internal_id"s, which are selected via RRF and top-k, and then the file as "skinny_shard_index.jsonl" tell the RAG agent exactly where to seek via disk IO to grab the message_body content and other metdata from the fat shard files.
+
+At the time of **KG creation**, the KG builder reads the file as "window_for_KG.jsonl" (which lists only "internal_id"s), and uses the index as "skinny_shard_index.jsonl" in order to locate quickly, the metadata required to derive the topology of our KG creation.
+
+KG (Knowledge-Graphs) creation requires us to have *windowed* metadata from the ingested shard file (which are output from "bin/window_maker.rb"). We may want to have the latest data from not more than 7 days ago, included within KG creation. We stage this windowed metadata onto disk.  The KG spine (thread_id, window_idx, window_range, internal_ids) is tiny compared to the "message_body" text.  This KG spine is output by "bin/window_maker.rb" and is the file which is called "window_for_KG.jsonl".  The cost of creating this file as "windows_for_KG.jsonl" is negligible, and means that, (1) the expensive cost of KG construction can occur when we tear down the existing KG, without having to reparse ingested shard files ; and (2) if KG constuction fails partway through, you can resume from the last completed window, and (3) this will allow us to experiment with different window sizes and overlaps without touching the raw shards. Our file as "windows_for_KG.jsonl" is a build-time manifest. The file as "windows_for_KG.jsonl" ought to be read-only, non-appendable, because we build once via `window-maker.rb` every time we wish to alter this rebuild-on-demand artifact with atomic overwrite.  We are to use `File.rename` for the write to avoid corrupting the file if the process dies mid-write, just like we do with our manifest files. 
+
+As an example of when `window_size=30` and `window_overlap=5` notice within the file as "windows_for_KG.jsonl" that `msg-026` through to `msg-030` appear within both windows 0, and 1, and `msg-051` through `msg-055` within both `window_idx=1`, and `window_idx=2`, as:
+```jsonl
+{ 
+  "thread_id": "t-a1b2c3", 
+  "window_idx": 0, 
+  "window_range": ["2024-03-01T08:00:00Z", "2024-03-01T14:22:00Z"], 
+  "internal_ids": [ "msg-001", "msg-002", "msg-003", "msg-004", "msg-005", "msg-006", "msg-007", "msg-008", "msg-009", "msg-010", "msg-011", "msg-012", "msg-013", "msg-014", "msg-015", "msg-016", "msg-017", "msg-018", "msg-019", "msg-020", "msg-021", "msg-022", "msg-023", "msg-024", "msg-025", "msg-026", "msg-027", "msg-028", "msg-029", "msg-030" ] } 
+
+{ "thread_id": "t-a1b2c3", 
+  "window_idx": 1, 
+  "window_range": ["2024-03-01T13:45:00Z", "2024-03-01T19:10:00Z"], 
+  "internal_ids": [ "msg-026", "msg-027", "msg-028", "msg-029", "msg-030", "msg-031", "msg-032", "msg-033", "msg-034", "msg-035", "msg-036", "msg-037", "msg-038", "msg-039", "msg-040", "msg-041", "msg-042", "msg-043", "msg-044", "msg-045", "msg-046", "msg-047", "msg-048", "msg-049", "msg-050", "msg-051", "msg-052", "msg-053", "msg-054", "msg-055" ] } 
+
+  { "thread_id": "t-a1b2c3", 
+  "window_idx": 2, 
+  "window_range": ["2024-03-01T18:30:00Z", "2024-03-01T23:58:00Z"], 
+  "internal_ids": [ "msg-051", "msg-052", "msg-053", "msg-054", "msg-055", "msg-056", "msg-057", "msg-058", "msg-059", "msg-060", "msg-061", "msg-062", "msg-063", "msg-064", "msg-065", "msg-066", "msg-067", "msg-068", "msg-069", "msg-070", "msg-071", "msg-072", "msg-073", "msg-074", "msg-075", "msg-076", "msg-077", "msg-078", "msg-079", "msg-080" ] }
+```
+
+As we already have the metadata for KG stored within our shard files (which were output from "bin/mbox_pre-parser.rb") we can construct a KG, and use it. We can use the super-skinny metadata from the pool output files (as "train.jsonl", "val.jsonl", and "test.jsonl" which were output from "bin/splitter.rb" during digest time) for windowing within KG creation, obtaining the rest of the metadata for KG creation from the fat shard files. 
+
+"bin/window_maker.rb" will read the **ingested** shard files, as mentioned within the file as "manifest_of_ingested_mboxes.jsonl", and after filtering out the DSR tombstones and manually excluded spotchecks (i.e. all `internal_id IN manually_excluded_tombstones.jsonl` OR `sender_address IN manually_excluded_tombstones.jsonl` OR `internal_id IN spotcheck_manual_exclusions.jsonl` OR `sender_address IN spotcheck_manual_exclusions.jsonl`) in order to establish the windowing required for Knowledge-Graph creation, the associated metadata for KG (including the metadata for attachments) will be read from the shard files.  This means that we can make the staged files output from "bin/window_maker.rb" super-skinny, whereby they only contain the metadata necessary for windowing, and nothing more.  This is in obedience to the DRY (don't repeat yourself) principle of data in general.  KG does *not* contain the email-bodies.  The `message_body`s are used by BM25, and the Vector DB (a semantic search), as well as to be used during a retrain done to LoRA. 
+
+The schema for our file as "windows_for_KG.jsonl" is as:
+```jsonl
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "windows_for_KG record",
+  "type": "object",
+  "required": ["thread_id", "window_idx", "window_range", "internal_ids"],
+  "additionalProperties": false,
+  "properties": {
+    "thread_id": {
+      "type": "string",
+      "description": "Thread identifier from threading pass"
+    },
+    "window_idx": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Zero-based window sequence within thread"
+    },
+    "window_range": {
+      "type": "object",
+      "required": ["first", "last"],
+      "additionalProperties": false,
+      "properties": {
+        "first": { "type": "string", "format": "date-time" },
+        "last": { "type": "string", "format": "date-time" }
+      },
+      "description": "MTA-derived temporal bounds of this window"
+    },
+    "internal_ids": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1,
+      "description": "Ordered SHA256 internal_ids in this window"
+    }
+  }
+}
+```
+Note that this schema is skinny by design. There is not any content, and no topology. The KG builder obtains its metadata by referencing the location which is referred to by the file as "skinny_shard_index.jsonl".
+
+To explain this in complicated layman's terms, KG is queried for, "Who emailed to whom? when? Within the same thread chain? With what attachments?", whereas BM25 returns those "internal_id"s which got hit, from a literal non-semantic search of email-bodies and associated metadata such as the "subject" field (where a semantic search might have hallucinated), which were specified during BM25 index building (as a separate digest-time step to respect DSR exclusions), whereas a semantic search of the Vector DB, returns those "internal_id"s which list positive by this semantic search, where the DPR Vector DB was previously populated by an LLM having read and interpreted our "email_body"s in a 2-pass read. 
+
+DPR is Dense Passage Retrieval. Instead of keyword matching (like in BM25), we encode queries and passages into dense vectors. At training time, relevant "query-passage pairs" are pulled together.  Irrelevant ones are pushed apart. At retrieval time of BM25, you encode the query once, and then compare it against all pre-encoded passage vectors via dot product, or cosing similarity.
+
+Within our hybrid retrieval from KG/Vector/BM25, we make a single pass of RRF across the outputs from DPR, BM25 and KG (which run in parallel), which will rerank these outputs in a way which is not staged (i.e. not a prior union between BM25 and DPR before RRF with KG), because a two-stage fusion would bias the weightings. 
+
+## What does "bin/window_maker.rb" do?
+This reads all the shard files which are mentioned within the file as "manifest_of_ingested_mboxes.jsonl", filtering out all DSRs and spotcheck-excluded `internal_id`s and `sender_address`s (i.e. all `internal_id IN manually_excluded_tombstones.jsonl` OR `sender_address IN manually_excluded_tombstones.jsonl` OR `internal_id IN spotcheck_manual_exclusions.jsonl` OR `sender_address IN spotcheck_manual_exclusions.jsonl`).  It outputs its windowed data to a staging area in the file as "windows_for_KG.jsonl". Note that there is not any mention of any split (train/val/test) when staging the data for KG creation, as KG is to use *all* the data from the ingested shard files, excluding, of course, the data which has been DSRed or spotcheck-excluded.
+
+## Does "bin/splitter.rb" prevent any context leakage across train/val/test?
+Yes!!!
+
+## Does "bin/splitter.rb" append to the manifest file *and* recreate the train/val/test JSONL set files?
+Yes.
+
+## Don't suddenly change your splitter seed or configured ratio! 
+"bin/splitter.rb" groups by thread_id, and always hashes with a deterministic seed, to assign train/val/test (80/10/10) to the immutable manifest, writing immutably to "assignments.json".  To say this again, "bin/splitter.rb" assigns per-thread splits using a deterministic hash (seeded) to hit a fixed ratio, so that the inputs always map to the same split in the immutable manifest, unless you change the seed, or configured ratio, which you ***must not*** do midstream because this would invalidate previous assignments ; and if you ***do*** do this then you ***MUST*** recreate the **whole** manifest again and then materialize it (!) effectively wiping the slate clean. 
+
+## KG databases
+These store data as nodes and edges.  Nodes are entities, and edges are relationships. Older databases like SQL look up a key within an index in order to find a row, which is of order O(log N) because B-tree indexes are balanced trees, not flat lists. KG databases are "index-free", which means that relationships are not derived at query time via key lookups. Each node stores pointers to its neighbours in memory, or on disk. To traverse a edge, the pointer becomes dereferenced, et viola, you have arrived.  There is no B-tree lookup, and no index scan. So traversing this edge is of order O(1).  Storage is typically adjacency lists, or edge tables, with node-local indexes.  By index-free adjacency, each node stores its outgoing edges with itself.  So node B physically hold a pointer to node A.
+
+TransE/RotatE/ComplEx learn vector representations for entities and relationships you have *already defined*.  TransE, RotateE, ComplEx are embedding models. There are primarily useful if you are trying to train an ML model upon graph structure, which we are not doing. They are embedding models. We won't be feeding them the finished graph so that they can turn nodes and edges into mathematical vectors. 
+
+Please note that we do not need to use a graph-embedding algorithm (TransE, RotateE, ComplEx) to create our ontological embedding to be stored within our KG database, because, as an ontological embedding specifies "how entities connect", we already have this data as metadata within our shard files output from "bin/mbox_pre-parser.rb".  Let us use this metadata to create our ontological embeddings : such data as 
+
+***NODES*** 
+- **Email_Address** : `from`, `to`, `cc`
+- **Email_Message** : `original_message_id`, and each of the `references` taken as an individual message-id, and `in_reply_to_message_id`
+- **Attachment** : each of the `attachments` taken as an individual attachment
+
+`attachments` contains the metadata associated with the attachments pertaining to any email. 
+
+***PROPERTIES***
+- `subject`, `thread_id`, `has_attachment`, `reply_to_email_address` ,`reply_to_this_email_address_instead`, `timestamp_received`
+
+Properties are attributes as data attached to the structural skeleton of the graph.  Our LPG (Labeled Property Graph) lets us associate key-value pairs with edges, and upon nodes : for example, we have the association of `time_stamp`, and `thread_id`, and `subject`, and `has_attachment` upon the node as `original_message_id`, upon the node as `in_reply_to_message_id`, and upon each of the `references` taken as an individual message-id, where `has_attachment=true` is a fast boolean filter for to "list all the emails with attachments", where we want to avoid traversing the graph to check for child nodes in `(EmailMessage)-[:HAS_ATTACHMENTS]->(Attachment)`.  
+
+A **Directed Acyclic Graph** (DAG) means that edges have direction, and that they have no loops (acyclic), and that you can't follow edges and end up back where you started.  A "Graph" is all the nodes and edges. A References chain is a DAG because emails point forward in time, so we can never cycle back. Note that we will extracting the `original_message_id` of the reply email pointing back to each of the `references`, taken as individual message-id's, (`original_message_id->references[0]`) and (`original_message_id->references[1]`). We could equally have done so the other way around, because within any LPG (Neo4j, etc) directed edges are traversable both ways : we can query `(A)-[:REFERENCES]->(B)` or `(B)-[:REFERENCES]->(A)` just as easily.  So "Which email is a reply to this one?" and "Which emails is this particular email a reply to?" are both viable questions.  This gets confusing in the sense that `references[0]` and `references[1]` are the children, while `original_message_id` is the parent of our `(Reply)-[:REFERENCES]->(Original)` forensic truth, but this "forward direction" is looking backwards in time. I will not change this because the parent to child relationship is as it should be.  But be aware cognitively, that following this edge forward is what we do when we ask "Which emails is this particular email a reply to?", and we are following this edge backwards when we are asking "Which email is a reply to this one?".  These two questions can be rephrased into more American English as "Which emails was this email in reference to?" and "Which emails replied to this one?", although I personally prefer to say "Which emails were in reply to this one?", because a person does the replying and the email *is* the reply ; but that is an aside for now. 
+
+A "Tree" is a special case of DAG whereby each node has at most one parent.  As we can have many message-id's within our references, edges between each of these nodes to our `original_message_id` node can be several : there can be multiple per per node as the `original_message_id`.  Our graph is a DAG, not a Tree, because multiple replies can point to the same `references[0]`, for example ; and a reply (the `original_message_id`) can be a reference multiple other nodes (each of the `references` taken as an individual message-id). 
+
+We don't typically pass a rigid schema file to Neo4j, like we would with a relational database.  Instead we feed it nodes and edges, amd Neo4j organizes them. Neo4j is where the graph lives. 
+
+The idea is *not* that we will feed Neo4j a list of edge triples, like `(original_message_id, EMAIL_WAS_SENT_BY_PERSON, from)`, e.g. (msg-123, EMAIL_WAS_SENT_BY_PERSON, alice@example.com). Instead we will use the language as Cypher to create nodes and their relationships to other nodes, in order to build our KG graph, and Neo4j will produce embeddings that encode structural positions. For example, the following creates two nodes: 
+```cypher
+MERGE (e:EmailAddress {email_address: "alice@bats.net"})
+MERGE (f:EmailAddress {email_address: "bob@frogs.net"})
+```
+But the following creates an edge:
+```cypher
+MERGE (a:EmailAddress {email_address: "alice@bats.net"})-[:ADDRESS_DID_SEND_MESSAGE]->(c:EmailMessage {message_id: "h3jj56"})
+```
+Neo4j doesn't receive a list of edge triples directly. Instead, we build the graph using Cypher, which creates the node and edges (relationships) on the fly. Cypher statements describe what you want the graph to look like, and Neo4j constructs it accordingly.  Every element must be defined by a `CREATE` statement, or by a `MERGE` statement.  A `MERGE` statement is idempotent (won't recreate nodes or relationships that currently exist within the graph) but it requires that we must have in use at least one property so that all the properties together can act as a pattern as a primary key.  Within `MERGE (e:EmailMessage {internal_id: "abc123...", original_id: "efg456..."})` it was previously guaranteed, during the mbox ingestion stage, by "bin/mbox_pre-parser.rb", that `internal_id = sha256(original_message_id + message_body)`, and then we deduplicated, at ingest, exact email duplications (where both the `original_message_id` and the `message_body` are identical). So, we *know* that within the ingested shard files, any row will *not* contain an exact duplication of the email message.  This means that if a collision has occurred upon the `original_message_id`, that the `message_body` will be different, otherwise this would have been an exact duplication of the same email landing twice, and thus prevented from appearing. So we can use `MERGE (e:EmailMessage {internal_id: "abc123...", original_id: "efg456..."})`, which *is* idempotent, and which won't fail with an error message if the node already exists, but it wouldn't be able to do anything other than succeed *with* a side-effect anyway, because MERGE matches upon labels (EmailMessage) and properties ({internal_id: "abc123...", original_id: "efg456..."}).  With MERGE you *must* specify at least one property that will be the unique primary key for this node, and if I have two or more properties, then MERGE matches the whole pattern, so all those properties together act as the key. But more importantly we *can* also use `MERGE (e:EmailMessage {internal_id: "abc123...", original_id: "efg456..."})`, because although `CREATE` does not look at properties, or their values at all, *and* `CREATE` *would* create two separate nodes with the same properties *if* those properties were identical, we already know that they cannot be identical. But duplications of all of the same identical properties can happen, for example, where we may be doing a `MERGE (q)-[:MESSAGE_IS_A_REPLY_TO_MESSAGE]-(p)` where one of the reference Message-IDs in (p) accidentally appeared twice due to a broken MUA. `CREATE` is blind, but faster.  This improvement of speed may be useful in reducing the amount of time in which it takes to build, or re-build a KG.  When doing a `MERGE (e:EmailAddress {email_address: "alice@bats.net"})`, however, the idempotency is useful, if not essential, in order not to waste time creating a node with the label as EmailAddress, which is already in existence, and which should *not* be created twice.
+
+Cypher is the language which is used in order to call Graph Data Science procedures : which are algorithms for centrality or community detection.  Neo4j's Graph Data Science (GDS) library provides algorithms for analyzing graph structure. Centrality algorithms, like PageRank or degree centrality, identify influential nodes. Community detection algorithms, such as Louvain modularity, find groups of densely connected nodes. These functions are implemented using Cypher, allowing you to query and analyze graph data effectively.
+
+We do the following.
+- 1. We design the schema for our particular ontology : the entity types, and the relations. Our email addresses are nodes (EmailAddress).  Our message-ids like `original_message_id`, `in_reply_to_message_id` and each of the `references` taken as an individual message-id are nodes (EmailMessage). Each of our `attachments` taken one by one are nodes (Attachment)".
+- 2. We define edge types: ADDRESS_DID_SEND_MESSAGE, MESSAGE_IS_A_REPLY_TO_MESSAGE, MESSAGE_WAS_RECEIVED_BY_ADDRESS, ATTACHMENT_BELONGS_TO_MESSAGE
+- 3. We think about how our nodes relate to each other.  The following assumes that mboxMinerva has received both the sent mail (outboxes), and the incoming mail (inboxes):
+```cypher
+MERGE (a:EmailAddress {email_address: "bob@frogs.net"})-[:ADDRESS_DID_SEND_MESSAGE {to: "alice@bats.net", from: "bob@frogs.net", cc: "them@theirs.net"}]->(p:EmailMessage {message_id: "34g7kd6w...", internal_id: "sk4ejru3...", ... })->[:MESSAGE_WAS_RECEIVED_BY_ADDRESS {to: "alice@bats.net", from: "bob@frogs.net", cc: "them@theirs.net"}]-(b.EmailAddress {email_address: "alice@bats.net"})
+
+MERGE (b)-[:ADDRESS_DID_SEND_MESSAGE {to: "bob@frogs.net", from: "alice@bats.net", cc: "them@theirs.net"}]->(q:EmailMessage {message_id: "hjj56wqr...", internal_id: "kwhkjw76..." })->[:MESSAGE_WAS_RECEIVED_BY_ADDRESS {to: "bob@frogs.net", from: "alice@bats.net", cc: "them@theirs.net"}]-(a)
+
+MERGE (q)-[:MESSAGE_IS_A_REPLY_TO_MESSAGE]->(p)
+```
+
+The following assumes that the mail is being sent to a common mailing list address target, whereby lots of people send public messages to one central address which distributes the mail subsequently:
+```cypher
+MERGE (z:EmailAddress {email_address: "ntg-context@ntg.nl"})
+
+MERGE (EmailAddress {email_address: "jenny@iceberg.net"})-[:ADDRESS_DID_SEND_MESSAGE {to: "ntg-context@ntg.nl", from: "jenny@iceberg.net", cc: "them@theirs.net"}]->(p:EmailMessage {message_id: "abc123...", internal_id: "efg456...", subject: "...", timestamp_received: "...", thread_id: "abcdefgh123...", has_attachment: true})->[:MESSAGE_WAS_RECEIVED_BY_ADDRESS {to: "ntg-context@ntg.nl", from: "jenny@iceberg.net", cc: "them@theirs.net"}]-(z)
+
+MERGE (EmailAddress {email_address: "wendy@lettuce.net"})-[:ADDRESS_DID_SEND_MESSAGE {to: "ntg-context@ntg.nl", from: "wendy@lettuce.net", cc: "them@theirs.net"}]->(q:EmailMessage {message_id: "a4b5c6...", internal_id: "e1f2g3...", subject: "...", timestamp_received: "...", thread_id: "abcdefgh123...", has_attachment: false})->[:MESSAGE_WAS_RECEIVED_BY_ADDRESS {to: "ntg-context@ntg.nl", from: "wendy@lettuce.net", cc: "them@theirs.net"}]-(z)
+
+MERGE (q)-[:MESSAGE_IS_A_REPLY_TO_MESSAGE]->(p)
+
+MERGE (EmailAddress {email_address: "john@wick.net"})-[:ADDRESS_DID_SEND_MESSAGE {to: "ntg-context@ntg.nl", from: "john@wick.net", cc: "them@theirs.net"}]->(r:EmailMessage {message_id: "rst234...", internal_id: "stu456...", subject: "...", time_stamp: "...", thread_id: "abcdefgh123...", has_attachment: false, reply_to_email_address: "kev@parker.com", reply_to_this_email_address_instead: "beano@dandy.org"})->[:MESSAGE_WAS_RECEIVED_BY_ADDRESS {to: "ntg-context@ntg.nl", from: "john@wick.net", cc: "them@theirs.net"}]-(z)
+
+MERGE (r)-[:MESSAGE_IS_A_REPLY_TO_MESSAGE]->(p)
+MERGE (r)-[:MESSAGE_IS_A_REPLY_TO_MESSAGE]->(q)
+
+```
+This assumed that "References" header within the email with the MessageID as "rst234..." (and hence the `references` metadata within the shard file row) contained the message-id's as ["abc123...", "a4b5c6..."].
+
+We want to have structural metadata, including the filename of attachments, their MIME type, size, and attachment_id, within the KG, which will report deterministically facts about "what exists".  We will not extract text content from attachments within RAG, because there would be technical difficulties if attachments are not readily parseable, and this level of granularity is too much, I say, and would populate our search data with random crap from the non-parseability, or non-standard parseability, of myriad, potentially password-protected, attachment files from sent emails.  By avoiding this level of absurd granularity, we don't have to worry about whether the email contains a binary, or non-binary, attachment, as a data-level concern.  Look.  This whole project was supposed to be a data curation program for the text content and metadata from an MBOX.  There are myriad projects out there which are all about AI examining multiple data formats, and parsing them.  These projects will add a lot of latency time to the AI inference prompt when we use it.  Therefore I reject this idea as a waste of time, and and waste of effort. The `has_attachment` metadata on any node in KG, is a Boolean which indicated whether the `attachments` field is an empty array or a non-empty array.  So, if the query pattern is "Find attachments pertaining to emails about finances", for a valid query, we want KG to filter out those `internal_id`s which have email attachments associated with them, and then we pass those `internal_id`s to RRF, while RRF will also receive results as `internal_id`s from a semantic search with our Vector DB, and also a plain textual search from BM25.  
+
+Note that KG does *not* pass its metadata other than `internal_id` to RRF : it does not pass such metadata as `original_message_id`, any of the `references`, `from`, `thread_id`, `timestamp`, `subject`, `has_attachment`, to RRF.  In order that RAG can reference this metadata (such as `attachments[0].unique_attachment_id`) KG returns relevant `internal_id`'s for RAG to examine the metadata of in the fat shard files, via looking up the location within which fat file to examine via our "skinny_shard_index.jsonl" metadata file.
+
+KG is a structural filter. Vector is a semantic filter. I find the idea of KG to be referencing and accessing the metadata pertaining to the attachments to be a clean way to work.  If we were to only ever need to "list attachments of this email", then we ought *not* have done a `CREATE (e.EmailMessage {Subject: "Hello", timestamp_received: "...", has_attachments: true, attachments: [{metadata1}, {metadata2}]})`, because Cypher likes properties to be flat (not nested).  Neither does Cypher have metaprogramming capabilities, so we cannot find all property keys which start with `attachment`, as in "attachment-001", and "attachment-002".  But we *do* wish to enable the user to query *across* emails, in such a prompt as "find all the pdfs Bob sent", in which case attachments should be separate nodes with properties like `filename`, `unique_attachment_id`, `attachment_size`, and `attachment_content_type`.  These attachment nodes should be separate nodes `(a:Attachment)-[:ATTACHMENT_BELONGS_TO_MESSAGE]->(email)` which first can be created (with associated properties) like any other node:
+```cypher
+CREATE (a:Attachment {
+  unique_attachment_id: 'att-abc-123',
+  filename: 'report.pdf',
+  attachment_size: 204800,
+  attachment_content_type: 'application/pdf'
+})
+```
+Secondly, we link to the parent email:
+```cypher
+MATCH (e.Email {Message_ID: 'msg-123'})
+CREATE (a)-[:ATTACHMENT_BELONGS_TO_MESSAGE]->(e)
+```
+Alternatively, we could have done all of this within one query:
+```cypher
+CREATE (a:Attachment {
+  unique_attachment_id: 'att-abc-123',
+  filename: 'report.pdf',
+  attachment_size: 204800,
+  attachment_content_type: 'application/pdf'
+})-[:ATTACHMENT_BELONGS_TO_MESSAGE]->(e.Email {Message_ID: 'msg-123'})
+```
+
+Now you can query: "all pdfs larger than 1MB", or "emails with attachments of type image/png", or "who sent the most spreadsheets?". These traversals are impossible with flat array properties.  Cypher is the query language for neo4j. When creating KG from scratch (which is necessary to remove DSRs) we will need to recreate our attachment nodes from a blank canvass and link them to the parent node of each.
+
+When new corpora of emails arrive and we wish to add them to KG, without enacting any DSRs, it is not necessary to recreate/rebuild the whole KG from scratch.  We can prevent deduplicates when we reparse by doing
+```cypher
+MATCH (e.Email {Message_ID: 'msg-123'})
+MERGE (a.Attachment {unique_attachment_id: 'att-abc-123'})
+SET a.filename = 'report.pdf',
+    a.attachment_size = 204800,
+    a.attachment_content_type = 'application.pdf'
+MERGE (a)-[:ATTACHMENT_BELONGS_TO_MESSAGE]->(e)
+```
+MERGE is an idempotent upsert : it won't duplicate attachment nodes if the same attachment is already with KG. An idempotent operation will produce the same result no matter how many times it is applied, after its initial invocation first run, preventing unintended side-effects when repeated.
 
 ### How does KG retrieval interpret what the user-provided prompt means?
-This happens by a smaller LLM when the query gets parsed, and decomposed, to extract entities ("john@mynet.org", "March") and intent ("emails from X about Y"). Entities get resolved to node-IDs. Then entities get resolved to KG node-IDs. Then the same LLM (or a dedicated smaller one) emits the Cypher/SPARQL : e.g. `MATCH (p:Person {email:"john@mynet.org"})-[:PERSON_DID_SEND_EMAIL]->[:Email] where e.date > 2026-01-01`.  You prompt the LLM with your graph schema (node labels, edge types, property keys) and the extracted entities and it outputs a Cypher query string.  Then you execute this string by Neo4j/etc programmatically. 
+This happens by a smaller LLM when the query gets parsed, and decomposed, to extract entities ("john@mynet.org", "March") and intent ("emails from X about Y"). Entities get resolved to node-IDs. Then entities get resolved to KG node-IDs. Then the same LLM (or a dedicated smaller one) emits the Cypher/SPARQL : e.g. `MATCH (p:EmailAddress {email:"john@mynet.org"})-[:ADDRESS_DID_SEND_MESSAGE]->[e:EmailMessage] where e.date > 2026-01-01`.  You prompt the LLM with your graph schema (node labels, edge types, property keys) and the extracted entities, and it outputs a Cypher query string.  Then you execute this string by Neo4j/etc programmatically. to inform the LLM about the same, we can just inject the schema into the system prompt.  We list the node labels, edge types, and key properties.
+
+The key trick for a small model is flattening your schema into this exact pattern before dropping it into the system prompt: 
+```txt
+Nodes: Person(name, age: INTEGER) | Movie(title, year) 
+Relationships: Person-[:ACTED_IN {roles: LIST}]->Movie
+```
+
+Keep relationships explicitly directed in the prompt, and tell the model "Relationships always have a type and direction." It saves a massive amount of ()-[]->() hallucination.
+
+The artifact link expired or failed - e2b sandboxes are ephemeral. Let me give you the actual template right here, no link needed:
+
+For a small LLM system prompt inject this exact block:
+```txt
+GRAPH SCHEMA:
+Nodes: Label1(prop1: STRING, prop2: INTEGER) | Label2(prop3: STRING)
+Relationships: Label1-[:REL_TYPE {meta: STRING}]->Label2
+
+RULES:
+- Use MATCH for undirected, pattern for directed
+- Never create new relationship types not listed above
+- Properties use exact names from schema
+- Return only the Cypher query, no explanation
+```
+Replace with your actual labels/rels. The critical bit for a small model is the explicit direction arrow and the "never create new types" rule, otherwise it hallucinates generic relationships like [:RELATED_TO] everywhere.
+
+If your schema is bigger than ~100 tokens, you'll want to filter it dynamically based on the user query before injecting, otherwise the small model drowns in noise.
+
+So we will have:
+```txt
+GRAPH SCHEMA:
+
+Nodes: 
+EmailAddress(email_address: STRING) | 
+EmailMessage(message_id: STRING, internal_id: STRING, subject: STRING, timestamp_received: STRING, thread_id: STRING, has_attachment: BOOLEAN) | 
+Attachment(unique_attachment_id: STRING, filename: STRING, attachment_size: INTEGER, attachment_content_type: STRING)
+
+Relationships: 
+EmailAddress-[:ADDRESS_DID_SEND_MESSAGE {to: STRING, from: STRING, cc: STRING}]->EmailMessage | 
+EmailMessage-[:MESSAGE_WAS_RECEIVED_BY_ADDRESS {to: STRING, from: STRING, cc: STRING}]->EmailAddress |
+EmailMessage-[:MESSAGE_IS_A_REPLY_TO_MESSAGE]->EmailMessage |
+Attachment-[:ATTACHMENT_BELONGS_TO_MESSAGE]->EmailMessage
+
+RULES:
+- Use MATCH for undirected, pattern for directed
+- Never create new relationship types not listed above
+- Properties use exact names from schema
+- Return only the Cypher query, no explanation
+```
+The reason why we have a `from: STRING` as a property upon the Relationship as `ADDRESS_DID_SEND_MESSAGE` is to improve the performance of a query such as "List all the email messages received by Bob in 2025 which were sent by Wendy". By having the sender's email-address upon the edge, the engine can filter those messages in a single step, without having to traverse back to an EmailAddress node for every single message. The same applies to the Relationship as `MESSAGE_WAS_RECEIVED_BY_ADDRESS`.  We are chasing raw-traversal speed. 
 
 ### What does the output format look like by KG retrieval?
-Typically this is a list of key-value pairs : e.g. `[{internal_id: "abc123", score: 0.95, path: [:Person]-[:PERSON_DID_SEND_EMAIL]->[:Email], meta: {from: "john@mynet.org", "date": "2024-03-01", subject: "Screen issues with phone"}}]`.  The "internal_id" is the join key back to the fat shard for the actual body text. "score" is the relevance signal for RRF (reciprocal rank fusion), and the path/meta give the LLM lightweight some structural context without having looked up or provided the full email-body to the LLM yet, which we will do only *after* RRF picks the final top-k.
+Typically this is a list of key-value pairs : e.g. 
+```ruby
+[
+  {
+    internal_id: "sha256_a1b2c3...",
+    score: 0.92,             # heuristic match strength from Cypher
+    node_type: "EmailMessage",
+    meta: {
+      thread_id: "t_0042",
+      timestamp_received: "2024-03-01T10:05:00Z",
+      from: "alice@example.com",
+      subject: "Re: Screen issues with phone"
+    }
+  },
+  {
+    internal_id: "sha256_x9y8z7...",
+    score: 0.78,
+    node_type: "EmailMessage",  
+    meta: {
+      thread_id: "t_0042",
+      timestamp_received: "2024-03-01T09:45:00Z",
+      from_addr: "fred@binom.com",
+      subject: "Screen issues with phone"
+    }
+  }
+  {
+    internal_id: null,
+    score: 0.85,
+    node_type: "EmailAddress",  
+    meta: {
+      thread_id: "t_0051",
+      timestamp_received: "2024-03-01T09:45:00Z",
+      from_addr: "fred@binom.com",
+      subject: "Screen issues with phone"
+    }
+  }  
+]
+```
+The "internal_id" is the join key back to the fat shard for the actual body text, "score" is the relevance signal for RRF (reciprocal rank fusion), and the "meta" field give the lightweight LLM some structural context without having looked up, or provided, the full message_body to the LLM yet, which we will do only *after* RRF picks the final top-k. Internal_id's are the only pointer you need - join them against "skinny_shard_index.jsonl" to receive the message_body, other metadata, and possibly a link to the acutal attachments contained with this is email message.  
 
-### What format does RAG retrieval produce?
-RAG produces similar key-value pairs : e.g. `[{internal_id: "abc", score: 0.95, chunk_id: "1234"}]`. RAG doesn't scan every vector fed into it linearly. When encoding the chunks into embeddings to feed in to, and populate, the vector DB, we encode the the chunks into embeddings at build time, and store them in an ANN (approximate nearest neighbour) index (FAISS/HNSW), and at query time we encode the prompt, and do an ANN lookup. 
+Recall that the edge as "[:ADDRESS_SENT_MESSAGE]" has the properties as "from", "to", and "cc". This enables us to resolve the question as "List me all the senders who sent messages with the subject as 'fluffy kittens'." to be resolved into the Cypher as:
+```cypher
+MATCH (a:EmailAddress)-[r:ADDRESS_SENT_MESSAGE]->(e:EmailMessage)
+WHERE e.subject CONTAINS 'fluffy kittens'
+  AND r.from = true
+RETURN a.email_address AS from,
+       collect(e.internal_id) AS internal_message_ids
+```
+The output will be:
+```ruby
+[
+  {
+    internal_id: nil,
+    score: 1.0,
+    node_type: "EmailAddress",
+    meta: {
+      from: "cat_lady@example.com",
+      internal_message_ids: ["sha256_aa...", "sha256_bb..."]
+    }
+  }
+]
+```
+internal_id: nil because the EmailAddress is the answer. The internal_message_id's in meta are provenance breadcrumbs - only hydrate those if the user asks "show me what they said". This skips RRF entirely; it's a pure metadata query routed straight through Text-to-Cypher.
+
+There is no body text returned by KG retrieval, and hence no bloat. The actual email bodies only get pulled by the RAG agent, after RRF picks the final top-K winners.
+
+Now to show you both the Cypher query and ouput from KG from the query as "Show me all the messages sent in 2025 with the word as 'kittens' in the subject, and which have an attachment":
+```txt
+MATCH (m:EmailMessage)<-[:ATTACHMENT_BELONGS_TO_MESSAGE]-(a:Attachment)
+WHERE m.subject CONTAINS 'kittens'
+  AND m.timestamp_received >= '2025-01-01T00:00:00Z' AND m.timestamp_received < '2026-01-01T00:00:00Z'
+RETURN m.internal_id AS internal_id, m.subject AS subject, m.timestamp_received AS timestamp_received,
+       collect(a {
+         .unique_attachment_id,
+         .filename,
+         .attachment_size,
+         .attachment_content_type
+       }) AS attachments
+```
+
+The output would be:
+```ruby
+[
+  {
+    internal_id: "sha256_msg01...", # Not nil! We might need to hydrate the text within a subsequent query
+    score: 1.0,
+    node_type: "EmailMessage",
+    meta: {
+      subject: "Kittens behaving oddly",
+      timestamp_received: "2025-06-12T14:22:00Z",
+      attachments: [
+        {
+          unique_attachment_id: "sha256_att1...",
+          filename: "vet_records.pdf",
+          attachment_size: 245000,
+          attachment_content_type: "application/pdf"
+        }
+      ]
+    }
+  }
+]
+```
+The RAG agent hydrates only if the user follows up with "read the content of that email.", or that was contained within the original query. 
+
+Note also that we do not include the metadata as "alleged_timestamp_sent" as a property within our `EmailMessage(message_id: STRING, internal_id: STRING, subject: STRING, timestamp_received: STRING, thread_id: STRING, has_attachment: BOOLEAN)` schema because it can be easily spoofed by a MUA (Mail User Agent), and is hardly likely to be valuable data within a search query, or searched for very often, as the user should be likely searching for the time when the email was received : i.e. when it passed through the last MTA (Mail Transfer Agent).  Note also that this does not preclude the RAG agent accessing and revealing the value of the field as "alleged_timestamp_sent" from the results from RRF if asked.  
+
+Now to answer the query as "Show me all metadata for all the Attachment that were sent in the month of May 2025 by wendy@frogs.com".  This is a pure metadata query, which will return an Attachment node.
+```cypher
+MATCH (addr:EmailAddress)-[r:ADDRESS_SENT_MESSAGE]->(m:EmailMessage)<-[:ATTACHMENT_BELONGS_TO_MESSAGE]-(a:Attachment)
+WHERE addr.email_address = 'wendy@frogs.com' AND r.from = true
+  AND m.timestamp_received >= '2025-05-01T00:00:00Z' AND m.timestamp_received < '2025-06-01T00:00:00Z'
+RETURN a.unique_attachment_id AS unique_attachment_id, a.filename AS filename,
+       a.attachment_size AS attachment_size, a.attachment_content_type AS attachment_content_type,
+       m.internal_id AS internal_id, m.subject AS subject
+```
+returning,
+```ruby
+[
+  { internal_id: nil, score: 1.0, node_type: "Attachment",
+    meta: { unique_attachment_id: "sha256_att01...", filename: "frog_report.pdf",
+            attachment_size: 204800, attachment_content_type: "application/pdf",
+            internal_id: "sha256_msg01...", subject: "May frog census" } },
+  { internal_id: nil, score: 1.0, node_type: "Attachment",
+    meta: { unique_attachment_id: "sha256_att02...", filename: "pond_photo.jpg",
+            attachment_size: 1048576, attachment_content_type: "image/jpeg",
+            internal_id: "sha256_msg01...", subject: "May frog census" } }
+]
+```
+where `internal_id: nil` because the graph answered everything. Within the structure as "meta", `internal_id + subject` are provenance breadcrumbs if the user later wants to read the actual email body - then you hydrate.
+
+What if the query was "Show me the attachment that Wendy sent on May 17h 2024"?  This has the same logic : it is a metadata query. We have `internal_id: nil` in the top-level envelope, but keep the `interal_id` within the field as "meta", so you can hydrate the actual file content on demand.
+```cypher
+MATCH (addr:EmailAddress)-[r:ADDRESS_SENT_MESSAGE]->(m:EmailMessage)<-[:ATTACHMENT_BELONGS_TO_MESSAGE]-(a:Attachment)
+WHERE addr.email_address = 'wendy@frogs.com'
+  AND r.from = true
+  AND m.timestamp_received >= '2024-05-17T00:00:00Z' AND m.timestamp_received < '2024-05-18T00:00:00Z'
+RETURN a, m.internal_id AS internal_id
+```
+Output:
+```ruby
+{
+  internal_id: nil,
+  score: 1.0,
+  node_type: "Attachment",
+  meta: {
+    unique_attachment_id: "sha256_file...",
+    filename: "frog_budget.xls",
+    attachment_size: 400000,
+    attachment_content_type: "application/vnd.ms-excel",
+    internal_id: "sha256_msg..."
+  }
+}
+```
+## Why KG *needs* the windowing from the email threads.
+Without windowing by thread_id, the main unavoidable danger to the creation of my knowledge-graphs, is that the edges may cross arbitrary batch boundaries, and become missed.  This would lose context for "who replied to whom, and when" : which is the whole purpose of KG.  Batch boundaries are artificial cuts in your data stream.  If I have windows of size 30, from the same thread of 200 emails, *without* any overlap between these windows for KG creation, then E30 replies to E29, which is captured, but when E31 replies to E30, this may result in a broken edge, because E30 and E31, which are within different windows, are processed independently. E30 lands in batch 1, and E31 in batch 2. There is no guarantee of the order in which these batches are started or completed, asynchronously. If we did omit the window-overlap to the KG creation, then our reply chain would become 6 disconnected subgraphs, instead of one 200-thread.  This absence of overlap would prevent edge continuity in KG.  This scenario must be avoided by using the windowing of email threads. We already have the metadata for this from the digest stage of our data curation. 
+
+## Tell me about Node2Vec and GraphSAGE
+Node2Vec a methods for learning embeddings of nodes in a network : by the word as "network", think of anything from a social network to a protein interaction map.  It is not used for ML of an lLm activation layer upon a graph as an input.  It maps the relationships within the graph.  You feed the network into a random walk.  It is transductive, whereby it will learn one vector per *existing* node via a biased random walk through the graph.  KG are basically just highly structured graphs. It does random strolls through the graph, collecting thousands of sequences.  Then Word2Vec notices patterns appearing within these sequences, and their frequency, assigning similar vectors to things that keep showing up near to each other.  It turns graph strutures into vectors that a machine learning model can actually understand.  The random walk will turn the graph into a sequence of nodes, and after the random walk has generated those sequences, Node2vec uses a skip-gram model, similar to what word2vec does with text : it treats each node in the walk as a "word" and the sequence as a "sentence".  By predicting the content of a node within those walks, it learns the vector for each node.  These vectors are embeddings : they represent the node in a continuous, low-dimensional latent space where proximity reflect structural similarity in the graph.  By "content" of a node within those walks, we mean the identity of the node itself.  In the skip-gram part, you're treating the node as a discrete unit, like a word in a sentence and the goal is to learn a vector that captures the context by which other nodes tend to appear nearby within those random walks. It is similar to speech prediction.  Just like word2vec predicts a word based upon its neighbours to capture semantic meaning, Node2Vec predicts nodes based upon their neighbours in the walk to capture structural meaning. It is not useful for our use case, and we will not be using it.
+
+GraphSAGE is a bit different because it is an inductive framework.  Instead of learning fixed embeddings for every single node like Node2Vec does, it learns an **aggregate function** that can be applied to any node. It samples a fixed-size neighbourhood for each node, and then uses a neural network to aggregate the features from those neighbours, using things like mean, pooling, or even lstm (long short-term memory) layers, to generate the embedding. This means is can generalize to entirely new nodes or even new graphs that weren't part of the original training, making it useful for dynamic networks. Instead of node-specific vectors, when a new vector arrives we run the learnt aggregator upon its neighbours, to get a vector without rebuilding KG all over again.  Long short-term memory is a type of recurrent neural network layer designed to handle sequences.  Unlike standard networks, it has a "memory cell" that can store information over long periods, using gates to decide what to remember, what to forget, an what to pass on to the next step. It is basically what makes models good at understanding things like language or time-series data where the order and the context of what cam before reallyer matters.  By "models" we mean ML (machine learning) models : things like neural networks, decision trees, or even simple statistical models.  Since we are discussing graphs and lstm's, we mean the specific mathematical architectures used to learn patterns from data. We will not be using GraphSAGE within our data curation pipeline.
+
+## Explain KG nodes and edges
+Edges aren't containers containing nodes ; they are labeled arrows *between* nodes.  Think of a city map where buildings are nodes, and one-way streets are edges.  The one-way street connects two buildings.  Edges are the "verbs" such as EMAIL_WAS_SENT_BY_PERSON, EMAIL_IS_A_REPLY_TO_EMAIL, ATTACHMENT_BELONGS_TO_MESSAGE.  In the graph we may wish to be having: `(a:EmailAddreess)-[:ADDRESS_DID_SEND_MESSAGE]->(b:EmailMessage)`. Here Alice is a node. The email is a node.  The attachment is a node. The arrows between them are edges. Nodes can have properties.  Edges can too heave properties.  You query by pattern-matching paths through nodes via edges.  An edge triple is (head, relation, tail). TransE models is as h + r ≈ t in vector space.  RotatE rotates h by r to reach t. ComplEx uses complex embeddings to handle asymmetric relations.
+
+References (from the email headers) *contain* Message-IDs of previous emails within this thread. The `original_message_id` (Message-ID) was created (hopefully uniquely) upon every email by either the email client, or the by the first MTA (mail transfer agent) the email message passes through. Properties describe *what a thing is*.  Edges describe *who it connects to*.  As our metadata within the ingested shard files contains a `from` field (containing an email address), so we can add this as a property on the node as EmailAddress, and as a property upon the edge as ADDRESS_DID_SEND_MESSAGE. Within the Cypher as
+```cypher
+MERGE (a:EmailAddress {email_address: "bob@frogs.net"})-[:ADDRESS_DID_SEND_MESSAGE {to: "alice@bats.net", from: "bob@frogs.net", cc: "them@theirs.net"}]->(p:EmailMessage {message_id: "34g7kd6w...", internal_id: "sk4ejru3...", ... })
+```
+we have created and edge between the EmailAddress node with the property as `email_address: "bob@frogs.net"` and the node as an EmailMessage with a lot of properties too.
+
+In addition to this, we also have the properties as `{to: "alice@bats.net", from: "bob@frogs.net", cc: "them@theirs.net"}` upon the edge, so that we can readily, and quickly, and efficiently, issue the query as "Show me all the emails that were sent by alice@example.com".  KG will return the internal_id's, and these will be passed to RRF so that our RAG agent may retrieve the email-bodies to present to the user. We also via this ontology readily be furnished with the answer to a question such as "Show me all the reply emails sent from bob@123.com to alice@999.com".  We shall be using an LPG (labeled property graph) like Neo4j, Amazon Neptune, or Tigergraph, whereby we will be creating reverse indexes, so that the edges within the LPG (labeled propert graph) can be traversed both ways.
 
 ## Tell me about BM25.
-BM25 is especially useful for exact names appearing within email-bodies and email-addresses appearing as metadata, whereas dense models sometimes hallucinate nearest-neighbor matches.
+BM25 is especially useful for exact names appearing within email-bodies, and email-addresses, appearing as metadata, where dense models would sometimes hallucinate nearest-neighbor matches.
 
 BM25 is the evolved form of TF-IDF (Term Frequency -- Inverse Document Frequency).  IDF measures how rare a term is across the whole corpora of email-bodies :
 ```
-IDF(qi) = log( (N - n(qi) + 0.5) / (n(qi) + 0.5) + 1 )
+IDF(q_i) = log( (N - n(q_i) + 0.5) / (n(q_i) + 0.5) + 1 )
 
 N = total number of documents, 
-n(qi) = documents containing the term as qi.
+n(qi) = documents containing the term as "qi".
+```
 Common words ("the", "is") have low IDF (they appear everywhere), rare words ("mboxMinerva", "transduction") have high IDF (these are informative).
-```
 
-BM25 multiplies the TF (term frequency) by the IDF, so rare matches count more. TF is how many times a word appears in a document. The raw form is just `f(qi,D) = count`.  But because a 10,000 word document naturally has higher counts than a 200 word document, BM25 solves this with the length normalization in the denominator, i.e. that is the `|D|/avgdl` part which penalizes long documents. Without normalization, long documents always win regardless of actual relevance. `avgdl` is the average document length. The BM25 length normalization term `|D|/avgdl` compares each documents length against the corpora average.  If a doc is larger than avgdl, the penalty kicks in.  Otherwise the term disappears because the penalty is only active when `b > 0`.  It prevents long emails (e.g. reply chains with the full history) outscoring short relevant ones just because they contain more words.  The full score for a document D given query Q (terms q1...qn) is given by: 
-```
-score(D, Q) = Σ IDF(qi) · [f(qi,D) · (k1+1)] / [f(qi,D) + k1 · (1 - b + b · |D|/avgdl)]
+BM25 multiplies the TF (term frequency) by the IDF, so rare matches count more. TF is how many times a word appears in a document. The raw form is just `f(qi,D) = count`.  But because a 10,000 word document naturally has higher counts than a 200 word document, BM25 solves this with the length normalization in the denominator, i.e. that is the `|D|/avgdl` part which penalizes long documents. Without normalization, long documents always win regardless of actual relevance. 
 
+`avgdl` is the average document length. The BM25 length normalization term `|D|/avgdl` compares each documents length against the corpora average.  If a doc is larger than avgdl, the penalty kicks in.  Otherwise the term disappears because the penalty is only active when `b > 0`.  It prevents long emails (e.g. reply chains with the full history) outscoring short relevant ones just because they contain more words.  The BM25 score for a document D given query Q (containing keywords as q_1...q_n) is given by: 
+```
+score(D, Q) = Σ IDF(q_i) · [f(q_i,D) · (k1+1)] / [f(q_i,D) + k1 · (1 - b + b · |D|/avgdl)]
+```
 f(qi,D) = term frequency of qi in document
-|D| = document length, avgdl = average doc length in corpus
+|D| = document length in words, 
+avgdl = average doc length in corpus
 k1 (default ~1.2-2.0) - TF saturation; higher = raw frequency matters more
 b (default 0.75) - length normalization strength; b=0 disables it entirely
 Key insight vs TF-IDF: the saturation function means going from 1 to 5 occurrences helps a lot, 50 to 55 helps almost nothing.
-```
+
 For our KG+DPR+BM25 pipeline, when BM25 is operating upon the email subject and body, because a subject match is typically worth more than a match from within the email-body, it will behove us to index the "subject" with a higher weight in the scoring. 
 
-We feed the following **text fields** into BM25 when building it: "subject", "from", "to", "cc", "thread_id", "email_body".  The idea is that if someone searches for "I heard that Wendy didn't go to school today at all, which was reported to me by Mr Thomas" then that may be of "email_body", but if they search "absence from school" then that may be of "subject", and if they search "john@mynet.com" then that might be of "from", "to", or "cc". 
+We feed the following fields with values as strings, into BM25 when building it : "subject", "from", "to", "cc", "message_body".  The idea is that if someone searches for "I heard that Wendy didn't go to school today at all, which was reported to me by Mr Thomas" then that may be of "message_body", but if they search "absence from school" then that may be of "subject", and if they search "john@mynet.com" then that might be of "from", "to", or "cc". 
 
 ### Can BM25 handle queries like "List me email contents which are about school absenteeism but within the same thread"? Can it filter upon thread_id?
-BM25 can't do either well.  "About school absenteeism" is semantic : and thus BM25 only matches if those literal words appear in the "subject" or the "email_body".  When we ask it to examine the same thread, this is structural.  BM25 has no concept of structural relationships.  DPR handles meaning.  KG handles structural relationships via thread_id edges.
+BM25 can't do either well.  "About school absenteeism" is semantic : and thus BM25 only matches if those literal words appear in the "subject" or the "message_body".  When we ask it to examine the same thread, this is structural.  BM25 has no concept of structural relationships.  DPR handles meaning.  KG handles structural relationships via thread_id edges. Therefore, we do not feed the string as "thread_id" into BM25 when building it.
+
+### What does the output from BM25 look like?
+It returns a list of scored `internal_id`s, no text.  It returns just the pointer and the lexical score.
+```ruby
+[
+  { 
+    internal_id: "sha256_abc_123",
+    bm25_score: 0.085
+  },
+  { 
+    internal_id: "sha256_def_456",
+    bm25_score: 0.072
+  }
+]
+```
+These results are fed directly into RRF for ranking.  No text is uncovered until post-RRF hydration.
+
+## Do we need a BM25 build phase?
+Yes. Absolutely. This happens during the **digest** phase (post-ingest) upon the rows from the shards which are mentioned within "manifest_of_ingested_mboxes.jsonl", which have had filtered out those `internal_id`'s and `sender_address`s which were listed within the files as "manually_excluded_tombstones.jsonl" and "spotcheck_manual_exclusions.jsonl". Thus we should be running the script as "bin/bm25_builder.rb" after we have done the necessary spot-checking, and have processed our DSRs.
+
+### The build phase (Offline)
+
+**Indexing Subject**: Where "k1" is a non-negative float which adjusts the **saturation** of term frequency (TF) weighting (a higher `k1` means TF matters more, but the consequences of increasing it too much will become negligible after a certain magnitude), and "b" (between 0 and 1), controls how **document length** affects scoring (`b=0` ignores length, `b1` penalizes longer docs more aggressively), since we are going to run "k1/b" lexical only" (with defaults as `k1=1.2` and `b=0.75`), this implies a standard, simple implementation, without have having any fancy schema fields. We have one text blob per document. 
+- **The Standard Way**: Concatenate `Subject + Body`. Thus, `text = email.subject + " " + email.body`.
+- **The Smart Way**: BM25 penalizes long documents. If you have a 500-word email, a 1-word subject match gets drowned out. If you want "Subject" to actually matter, duplicate it in the text stream before indexing. 
+```ruby
+# Repeat subject 5x to artificially boost its Term Frequency (TF)
+full_text = (email.subject + " ") * 5 + email.body
+```
+This tricks the algorithm into thinking the subject words are way more frequent than they are, giving them a ranking boost without complex field logic.
+
+Builder Logic Sketch:
+```ruby
+# bm25_builder.rb
+index = {} # { internal_id => { term => tf }, ... }
+total_docs = 0
+
+shards.each do |shard|
+  shard.documents.each do |doc|
+    # Ensure internal_id is the key
+    text = (doc.subject * 5) + " " + doc.body 
+    tokens = tokenize(text)
+    
+    index[doc.internal_id] = {
+      doc_len: tokens.size,
+      tf: tokens.tally # { "kittens" => 1, "fluffy" => 2 }
+    }
+    total_docs += 1
+  end
+end
+
+# Calculate IDF (Inverse Document Frequency) based on the whole corpus
+# Then dump to disk: bm25_index.dump
+```
+
+## Teach me about the BM25 query phase
+At RAG startup we deserialize `bm25_index.dump` into memory. This data structure is basically a hash like: 
+```ruby
+{
+  :meta => {
+    :avg_doc_len => 412.5,
+    :k1 => 1.2,
+    :b => 0.75
+  },
+  :vocabulary => {
+    "kittens" => {
+      :idf => 3.45, # Inverse Document Frequency
+      :postings => [ # List of documents containing this term
+        { :internal_id => "sha256_abc...", :tf => 2, :doc_len => 500 },
+        { :internal_id => "sha256_def...", :tf => 5, :doc_len => 350 }
+      ]
+    },
+    "fluffy" => {
+      :idf => 2.1,
+      :postings => [
+         { :internal_id => "sha256_abc...", :tf => 1, :doc_len => 500 }
+      ]
+    }
+  }
+}
+```
+When a query hits, we tokenize it in the same way we did at build time, with the same analyzer. We look up each query term's IDF and postings list.  Then for each candidate `internal_id` across those lists we compute the BM25 sum:
+```
+score += idf(t) * (tf * (k1+1)) / (tf + k1 * (1 - b + b * doc_len/avg_dl))
+```
+The query tokenizer *must* match your index tokenizer exactly (lowercasimg, stemming, stopwords) or we will get silent misses.
+
+**Implementation Note**: As in Ruby, a Hash of Hashes is a memory hog due to object overhead, as our index may be massive, we will store the posting lists as parallel arrays (one array for internal_id, one for tf) instead of an array of hashes to save RAM, but the structure above is how you reason about the logic.
+
+## Tell me about our Vector DB
+We can say that a DPR (dense passage retrieval) Vector DB has two stages : offline (chunk and embed and index), and online (retrieve).
+
+### Vector offline stage
+This consists of three phases: CHUNKING, EMBEDDING, and INDEXING.
+
+During CHUNKING, you must chunk your email-bodies (e.g. to 512 tokens), and the run each chunk through an EMBEDDING model to obtain a vector. An EMBEDDING model converts text (or images, etc) into a fixed-size vector (typically between 384 to 1536 dimensions). Semantically similar vectors are closer together within the vector space. Then you must store these vectors, plus the text which generated them, within a vector database (FAISS/ChromaDB) with an approximate-nearest-neighbour (ANN) index for fast lookup. This last stage is called INDEXING. The index stores the embedded vector and the "internal_id" together within one structure.
+
+### Vector online stage (QUERY TIME)
+This consists of one phase: RETRIEVAL.
+
+During RETRIEVAL time (the first part of QUERY TIME), you must embed the user's question by using the same embedding model, and ask the vector database to find the nearest vector so that the Vector DB can return the associated "internal_id" to pass to RRF, in order that the RAG agent can look up other corresponding metadata.
+
+### What format does Vector retrieval produce?
+Vector produces similar key-value pairs : e.g. `[{internal_id: "abc", score: 0.95}]`. Vector doesn't scan every vector which has been previously fed into it linearly. When encoding the chunks into embeddings to feed in to, and populate, the vector DB, we encode the the chunks into embeddings at build time, and store them in an ANN (approximate nearest neighbour) index (FAISS/HNSW), and at query time we encode the prompt, and do an ANN lookup. 
 
 ### And the RAG agent?
-This is just an LLM which can autonmously decide to call the retrieval pipeline (BM25/DPR/KG/whatever) as a tool mid-conversation, rather than having retrieval hardwired into every prompt. BM25/DPR/KG return "internal_id"s with scores, which are reranked by RRF and selected by top-k after having been sorted by score. Then the "bin/email_expatiator.rb" will be called by the RAG agent, and this retrieval tool will be able to pull the full "email_body", and full metadata such as "from", "to", "timestamp", "subject", "attachments". In other people's projects, this form of email-expatiation, whereby we pull fat content by looking up the "internal_id" within the within shard files, might be known a "hydration".  Once we have the actual full metadata, thereby agentic RAG will also have knowledge of any email attachments' "Content-ID", "Content-Type", "Content-Disposition", "size_of_attachment", "filename_of_attachment", and "unique_attachment_id", whereby this attachment will also be able to be retrieved by calling a simple tool called "bin/actual_attachment_retriever.rb" passing in the "unique_attachment_id" as an argument. 
+This is an LLM which can autonomously decide to call the retrieval pipeline (BM25/DPR/KG) as a tool mid-conversation, rather than having retrieval hardwired into every prompt. BM25/DPR/KG return "internal_id"s with scores, which are reranked by RRF and selected by top-k after having been sorted by score. 
 
-TO DO. create "bin/email_expatiator"
-TO DO. create "bin/actual_attachment_retriever.rb"
+As results from KG with the `node_type: "EmailAddress"` or with `node_type: "Attachment"` have no `message_body` text to embed, we can filter these out into a sidecar called "extraneous KG accompaniments", to prevent these being assessed by RRF at all. Then the RAG-agent will call our LoRA-trained LLM with the top-K RRF returned results expanded with the message_body, as its inputs. This will prevent the fine-tuned LoRA-trained LLM seeing any results with the `node_type: "EmailAddress"`, or with `node_type: "Attachment"`, at all. Now, at the moment before, during, or after, the RAG-agent makes the decision as to send the top-K RRF returned results expanded with the message_body, to the LoRA trained LLM, the RAG-agent can make a decision as whether to call the function as "bin/shard_data_extractor.rb", with these parked sidecar results, which were previously from KG, as its inputs (the function as "bin/shard_data_extractor.rb" will be acting upon these inputs).
+
+If, then, the "bin/shard_data_extractor.rb" will be called by the RAG agent, and this retrieval tool will be able to pull the full "message_body", and *also* the full metadata from the fat ingested shard files may be called by this same tool as "bin/shard_data_extractor.rb", via accessing the location of this metadata from what shard file, via reading, or otherwise accessing, the data within the file as "skinny_shard_index.jsonl", which is a cache between those "internal_id"s, and the relevant locations within the fat shard files. 
+
+In other people's projects, this form of email_message_body_extraction, whereby we pull fat content by looking up the "internal_id" within the within shard files, might be known as "hydration".  
+
+Once we have the actual full metadata, thereby agentic RAG will also have knowledge of any email attachments' "Content-ID", "Content-Type", "Content-Disposition", "size_of_attachment", "filename_of_attachment", and "unique_attachment_id", whereby this attachment will also be able to be retrievable, and presented to the user, by calling a simple tool called "bin/email_message_attachment_retriever.rb" passing in the "unique_attachment_id" as an argument. 
+
+TO DO. create "bin/shard_data_extractor"
+TO DO. create "bin/email_message_attachment_retriever.rb"
 
 You don't need to *embed* something to find it; you just need it to be associated with something that *is* embedded. 
 
-## Would running `window_maker.rb` to include recently arrived emails for training the LoRA adapters, break reproducibility? 
-Do you mean the reproducibility of creating the trained LoRA adapters?  If so, then the answer is yes, because they are never reproducible, due to the fact that the data we are curating upon is a dynamically updating target.  Thus we lose reproducibility of recreating any LoRA adapter, i.e. you are putting more metadata into your pools/sets within "assignments.jsonl", which reference real newly arriving email data from shard files (output from "bin/pre-parser.rb"). Also `window_maker.rb` can always break reproducibility due to independently arriving DSR tombstones within the manifest file as "expanded_DSR_exclusions_manifest.jsonl". The point being, that as soon as you issue a `window_maker.rb`, you *will* lose reproducibility. In addition to these considerations, consider this.  Can you guarantee that all of your hyperparameters are constant, and that the implementation details of the hardware you are training on is the same? The point of an AI is that it is supposed to appear pseudo-intelligent, of course, so should you really be thinking of it like a chemistry experiment?  Ought you really be thinking of AI training to be as an example of deterministic programming?
- 
-## If we have materialized all the ingested and digested emails up to, and including, the emails by the date of 2025-06-01, but *don't* recreate KG until 2025-08-07, then will the KG trained in August still be useful after the bump in June?
-Apart from this delay being a funny way to work, DSRs received in July 2025 will *not yet* have resulted in their corresponding rows being filtered from the pools/sets from "assignments.jsonl", because the latest DSR tombstones within the manifest as "expanded_DSR_exclusions_manifest.jsonl" won't have become omitted from the latest versions of "train.jsonl", "val.jsonl" or "test.jsonl".  So the answer is : in practice, you will have forgotten to remove the DSRs from the pools/sets, *and* you will have *not* included the latest corpora of emails between the moment when "bin/window_maker.rb" was run in June 2025 (resulting into such materialization of metadata from the manifest file as "assignments.jsonl" into "train.jsonl", "val.jsonl" and "test.jsonl"), and the time of creating the KG in August.
+## Tell me about RAG generation time, and what this is.
+At this time, we have already obtained the top-K results from RRF (reciprocal rank fusion), and we *must* hydrate the `internal_id`s from these to obtain the `message_body`s.  Now we must chunk these `message_body`s. 
 
-## Tell me again. Won't DSR tombstones break reproducibility?  
-Answer. Yes, deliberately. That is the legal tradeoff.  You *cannot*, and *must not*, reproduce data a person exercised their GDPR right to erase, but you still preserve *attestation* : this being an auditable record of what had been removed from "train.jsonl", "val.jsonl", and "test.jsonl", at training time, in a tombstone log output showing what was removed and when.  So your audit trail becomes, "This particular LoRA (reference name) was trained after DSR removed X, Y, Z". 
+Typically, you send the system prompt, the user query, and then the retrieved chunks (the "hydrated" part) as part of the context.  Usually, you'll wrap the chunks in some kind of instruction, so the model knows these are the source material to use for the answer.
+
+During GENERATION time, in this stage, you must take those raw text chunks, and build a prompt like: 
+```
+System: Answer using only the provided context. If unknown, say so.
+Context: <chunk1> Paris is the capital and most populous city of France.</chunk1> <chunk2>It is known for its art, fashion, gastronomy, and culture </chunk2>
+User Query: What is the capital of France? 
+```
+
+Where the System prompt as "Answer using only the provided context. If unknown, say so." could have been "Answer based upon the context above", and could equally have been the string as "Based upon the context exclusively, respond to", or "Using only the previously provided passages, answer...".   I will refer to the whole input window (system prompt + chunks + query + everything) as an "input window", because to refer to this as the "Context", I say, is as inappropriate as to refer to the whole internet as a "remote data Context", or the whole Universe as a "quantum-dynamical system Context".
+
+Another example prompt is:
+ ```
+System: You are a professional assistant AI robot. Answer to the best of your abilities using the Context given.
+Context: <chunk1> Alice sent the crash report on March 3rd.  Bob acknowledged it March 4th. </chunk1> <chunk2> The fix was deployed March 7th. </chunk2>
+User Query: When was the crash resolved?
+```
+The idea of this last System prompt is that as we will have fine-tuned as activation layer such as LoRA to sit atop the LLM which is answering this query, it will still use its internal knowledge, but we are essentially telling it to treat the Context as the priority. It won't suddenly lose its training, and we are essentially setting the ground rules for how it should weight that training against the provided data.  It is like giving someone a textbook and telling them to answer based upon it.  This person still knows things, but you are expecting them to refer to the pages. 
+
+So the model (which we have previousy LoRA-trained) sees the chunks, and then the question, and then generates the response.  We are just instructing it to use whatever we gave it.  The model reads the injected context as if it "knew" those facts, generates a grounded answer, and ideally won't hallucinate beyond what the chunks inform it of. The prompt budget matters here.  A request to an LLM (System + K chunks + User) must usually leave room for an answer (System + K chunks + User + Response): which must fit the LLM's context window.  Too many chunks is noise.  Too few chunks is missed information.  A typical K is between 3 to 8.  It would be technically possible to hack and chop the KV cache of an LLM inference into pieces and rearrange them to retain an understanding of having read something, but without the ability to actually consult the past text.  This KV (Key-Value) cache is in RAM (CPU), or vRAM (GPU), and each transformer layer maintains its own KV pair tensors there, growing with every token processed, which is why input window length directly eats memory, and why it can be desirable to contract the input window length. When I say "leave room for an answer" I am talking about space for the KV cache.  We are talking about what goes on in an LLM inference under the hood.  The actual text of the input, and the token numeric representations of it, are only a few bytes per word/token, and the embeddings of processed tokens are something like 16kB per token.  The KV cache is pairs of embeddings that allow you to calculate the next token without having to reprocess every previous token in the sequence because of every newer token which is coming along.  It could almost be described as the "understanding" of the text.
+
+## What is the field as "internal_id" within the shard files which are output from "bin/mbox_pre-parser.rb"?
+It is a collision-proof SHA256 hash of the `Message-ID` plus the `messge_body hash` (`internal_id = original_message_id + message-body`), serving as a unique primary key to deduplicate exact content matches, while tracking different versions of the same Message-ID. This means that within an historical inbox of many emails spanning decades, although RFC 2822 says that email Message-IDs should be globally unique, we are protecting ourselves in case two separate `message_body` contents arrive (potentially decades apart), with the same Message-ID (a collision) : in which case, the `internal_id`s would be different, and we don't reject these messages from appearing with the ingested shard files.  
+
+A Message-ID collision is where two separate email bodies (perhaps sent years, or decades, apart) share the same Message-ID (which is a field within the email header). It is a rare event, which hopefully should not occur, but it might do so.  If, and when, it does occur, by our prior algorithmic logic (within "bin/mbox_pre-parser.rb"), the `internal_id`s of these two messages, which collide upon the Message-IDs, will be different. So. A Message-ID collision will have two Message-IDs the same : that is, the `original_message_id`s will be the same, but the `message_body`s will be different.  
+
+This will be bad for KG creation as the `original_message_id` is used as a node within it.  Within the build Cypher as :
+```cypher
+MERGE (q:EmailMessage {message_id: "hjj56wqr...", internal_id: "kwhkjw76..." })-[:MESSAGE_IS_A_REPLY_TO_MESSAGE]->(p:EmailMessage {message_id: "34g7kd6w...", internal_id: "sk4ejru3...", ... })
+```
+we want `message_id` to be unique so as to avoid false positives being entered into the KG graph.
+
+Is there a defensive procedure we could use to guard against this case and scenario?  Well yes. When we use `MERGE` this command matches upon labels (EmailMessage) and properties `{message_id: "hjj56wqr...", internal_id: "kwhkjw76..." }` where it considers all of these properties as a pattern, which it uses as the primary key. `CREATE` is blind, but faster.  `CREATE` *would* create two separate nodes with the same properties *if* those properties were identical. But duplications of all of the same identical properties can happen, for example, where we may be doing a `MERGE (q)-[:MESSAGE_IS_A_REPLY_TO_MESSAGE]-(p)` where one of the reference Message-IDs in p accidentally appeared twice due to a broken MUA. Therefore we will use `MERGE` within out Cypher. 
+
+We *will*, at ingest time, reject exact duplications of the same email (which will have the same `internal_id`).
+
+## The emails' encoding
+"bin/mbox_pre-parser.rb" opens the mbox as a read binary. After parsing the inbox to get an array of individual raw emails, and after detaching the attachments for later RAG reference and retrieval, and after after extracting the Message-ID, then, for each message, it checks whether the field as `Content-Type: charset` is present within each message, reading the message in the charset specified if it is ; and if this charset field is not present, we auto-detect the encoding of this email using the `charlock_holmes` gem, and if `charlock_holmes` chokes, we assume that the email body is written in UTF-8, in which case we also proceed by replacing unrepresentable bytes with "?".  Otherwise, if we don't do any of this character-set detection, the ruby programming language (which this project is written in) may treat strings within the email as raw bytes (ASCII-8BIT), but JSON (the format which the shard files gets written into) needs valid UTF-8.
+
+If the "bin/mbox_pre-parser.rb" splits a long thread into separate output shard files, then the fact that the pre-parser, at ingest time, has split this long email thread into separate shard files, means that "bin/mbox_pre-parser.rb" has simply sliced the flat array of raw email messages, held in RAM (random access memory), every 1000 entries (or whatever your `--shard-size M` option is).   
+
+## Shard files output from "bin/mbox_pre-parser.rb"
+These have ***no*** record of DSRs. They are fat : they contain the email body and *all* the metadata which is extracted from the mbox which was deemed relevant.
+
+## Do the train/val/test JSONL files contain the actual message_body as well as the same metadata that the manifest file as "assignments" contains?
+No. They are "skinny".  The only metadata field taken from the manifest as "assignments.jsonl", which these super-skinny non-windowed pool files contain, is `internal-id`, and they *do not* contain the `message_body`.  These files as "train.jsonl", that of "val.jsonl", or that of "test.jsonl", contain the (non-windowed) metadata as `internal_id:, split_tag:, which_pre-parsed_shard_file:, location_within_this_shard_file` which is copied from the "assignments.jsonl" in order that the stages as pre-LoRA, and LoRA, can just iteratively parse these pool files, instead of having to be loading 100% of rows from "asignments.jsonl", and filtering to 80% of the total upon every epoch. Even if this is not the case due to a staging area after pre-LoRA of scrubbed and decribbed `message_body` data being triaged from the pre-LoRA stage to the LoRA stage, it is nice, and useful, to have specific pool files to input to the stage as pre-LoRA, in order that pre-LoRA can operate upon them.  
+
+The shard files output from "bin/mbox_pre-parser.rb" during ingest are JSONL files which were generated by "bin/mbox_pre-parser.rb", and which contain the actual `message_body`s and all the metadata. 
+
+## Won't the appending to the whole manifest file every time a new batch/corpus of emails arrives be costly in terms of processing and disk I/O?
+In practice, no. This is because the manifest file as "assignments.jsonl" is just metadata, not `message_body`s, so even a million threads is maybe 50-100MB of JSON, which can be appended to quickly.  Even the rewriting to the train/val/test JSONL files will happen quite quickly upon a modern disk. The costly work is the parsing of mbox files, and tokenizing decribbed and scribbed `message_body`s, the latter of which dwarfs the manifest I/O by orders of magnitude. 
+
+## "bin/splitter.rb" outputs the immutable manifest file as "assignments.jsonl"
+The manifest file as "assignments.jsonl" contains ***no*** windowing, and contains ***no*** DSR records. "bin/splitter.rb" writes this manifest file *and* the three pool files as "train.jsonl", "val.jsonl", and "test.jsonl" in one pass.
+
+## Why does "bin/mbox_pre-parser.rb" output shard files?
+Recall that "bin/mbox_pre-parser.rb" is being called upon a raw MBOX. Raw mboxes are often one huge file per list history so far, or per month, or per week.  The pre-parser converts the physical MBOX into logical JSONL Rows. A **Logical Row** is the *atom* (one single email or thread entry), while a **Shard** is the *bucket* (the actual JSONL file holding thousands of those atoms).  The pre-parser outputs shards so that the downstream tools (which are invoked at pre-LoRA training time) can process data in parallel chunks instead of choking upon one massive 50GB file.
+
+"bin/mbox_pre-parser.rb" walks messages in order and assigns each one to exactly one part-XXXXXX.jsonl file, so that together the shards are just a clean partition of the body of emails, rather than containing overlapping copies of each other.
+
+"bin/mbox_pre-parser.rb" writes to JSONL shard files (e.g. "./pre-parsed/until_2026-03-24T18:47:00Z_000002/part-000001.jsonl"). This directory may contain many shard files. The stage as pre-LoRA will glob each of those directories which are listed within the file as "manifest_of_ingested_mboxes.jsonl", sorting these in order by filename, each of which shall be parsed in order.  
+
+Shards are non-overlapping.
+
+## Why do we produce flat pool files (not sharded) as the output from "bin/splitter.rb"
+Note that for simplicity, and downstream tooling for the training of LoRA, the outputs from "bin/splitter.rb" are materialized as single flat files as "train.jsonl", "val.jsonl", and "test.jsonl", as these contain metadata only, and are quite "skinny", and thus require inexpensive disk I/O (input/output) on a modern solid state drive, and interface.  The costly work is the parsing of MBOX files during pre-processing, and the tokenizing of email bodies during training of LoRA.
+
+In our code base there is no ruby file that chops "train.jsonl" into shards ; "bin/splitter.rb" merely produces one flat "train.jsonl" file for pre-LoRA, and the actual "sharding" within LoRA training, happens later inside the training stack's data loader (e.g. the finetune script, / vLLM or PyTorch+DeepSpeed job that reads the Alpaca data structures from pre-LoRA training time, and can automatically segregate and allocate each Alpaca training data the across workers at LoRA training time asynchronously) after the `message_body`s have been pii-scrubbed and decribbed and stored at a temporary SHARDED staging area to be passed to the actual LoRA training.  Think of this as a final form of sharding the data curated `message_body`s for LoRA training so that this final training stage won't choke on one massive file, and will be able to process these data-curated shards in parallel.
+
+## When are my unique thread_id's created?  
+These are created by "bin/mbox_pre-parser.rb" ; then, later, "bin/splitter.rb" assigns one deterministic split from these thread ids.
 
 ## Is there any point to a `window_maker.rb` without a subsequent retrain of the model?
-Yes.  This is done so that KG will have an updated data source, with all the latest DSR removed, and (if ingest and digest have already most recetly occurred) with all the latest emails from the latest corpora, for regeneration of the KG from scratch.
+Yes.  This is done so that KG will have an updated data source, with all the latest DSR removed, and (if ingest and digest have already most recently occurred) with all the latest emails from the latest corpora, for regeneration of the KG from scratch.
 
-This process also may validate that latest arriving emails have landed correctly, but you could always, preferably, determine that the latest corpus of emails have landed correctly by examing the tail of the latest shard file output during ingestion, which would additionally allow you to perform inspection of the email bodies.  You *can* rematerialize to audit row counts (in which case you would be examining all three "train.jsonl", "val.jsonl", and "test.jsonl") *after* these emails from the newer cohort have been ingested, but to spot-check data quality (encoding errors, schema conformance) the email body is required, not these "skinny" metadata-only files. It would make more sense though to audit row counts via the inspection of the latest shard file, output from "bin/mbox_pre-parser.rb" during ingestion. 
+To spot-check data quality (encoding errors, schema conformance) the email-body is required to be inspected, not these "skinny" metadata-only files. 
 
-## Tell me about "bin/spot_checker.rb".
-This command, by default, will output the first 10 email bodies to STDOUT, but the `-N` option will enable this number of output email-bodies to be varied. Additionally the `--output myfile` option will make the output be written to the file as "myfile", instead of STDOUT. It is within the script as "bin/spot_checker.rb" that the field as "mbox_processed_at" from the shard files (output at ingest by the file as "bin/mbox_pre-parser.rb") may be used.  Thus `spot_checker.rb --processed_on_and_after 2026-02-07` will list the email-bodies which are processed on the date as 7th February 2026, and after, that data ; whereas  `spot_checker.rb --processed-before 2026-02-05` will list those email-bodies which are processed on, or before, 5th February 2026 ; and `spot_checker.rb --processed-at 2026-02-06` will filter into the list every email which was on a corpus which was processed at 7th February 2026. Further, the granularity of the searches can be made more fine by the use of the options as `--from ted@abc.com`, `--to joan@xyz.com`, `--cc wendy@jhk.com luke@pqr.com`, `--reply_to_email_address stuart@bnm.com` , `--reply_to_this_email_address_instead jane@poq.com`, `--subject 'fluffy kittens'`.
+## Tell me again. Won't DSR tombstones break reproducibility?  
+Answer. Yes, deliberately. That is the legal tradeoff.  You *cannot*, and *must not*, reproduce data a person exercised their GDPR right to erase, but you still preserve *attestation* : this being an auditable record of what had been removed from "train.jsonl", "val.jsonl", and "test.jsonl", for training time, in a tombstone log output showing what was removed and when.  So your audit trail becomes, "This particular LoRA (reference name) was trained after DSR removed X, Y, Z". 
+
+## Would running `splitter.rb` to include recently arrived emails for training the LoRA adapters, break reproducibility? 
+Do you mean the reproducibility of creating the trained LoRA adapters?  If so, then the answer is yes, because they are never reproducible, due to the fact that the data we are curating upon is a dynamically updating target.  Thus we lose reproducibility of recreating any LoRA adapter, i.e. you are putting more metadata into your pools/sets within "assignments.jsonl", which reference real newly arriving email data from shard files (output from "bin/pre-parser.rb"). Also "bin/splitter.rb" can always break reproducibility due to independently arriving DSR tombstones within the manifest file as "manually_excluded_tombstones.jsonl". The point being, that as soon as you issue a `splitter.rb`, you *will* lose reproducibility. In addition to these considerations, consider this.  Can you guarantee that all of your hyperparameters are constant, and that the implementation details of the hardware you are training upon is the same? The point of an AI is that it is supposed to appear pseudo-intelligent, of course, so should you really be thinking of it like a chemistry experiment?  Ought you really be thinking of AI training to be as an example of deterministic programming?
+ 
+## If we have materialized all the ingested and digested emails up to, and including, the emails by the date of 2025-06-01, but *don't* recreate KG until 2025-08-07, then will the KG trained in August still be useful after the bump in June?
+Apart from this delay being a funny way to work, DSRs received in July 2025 will *not yet* have resulted in their corresponding rows being filtered from the pools/sets from "assignments.jsonl", because the latest DSR tombstones within the manifest as "manually_excluded_tombstones.jsonl" won't have become omitted from the latest versions of "train.jsonl", "val.jsonl" or "test.jsonl".  So the answer is : in practice, you will have forgotten to remove the DSRs from the pools/sets, *and* you will have *not* included the latest corpora of emails between the moment when "bin/window_maker.rb" was run in June 2025 (resulting into such materialization of metadata from the manifest file as "assignments.jsonl" into "train.jsonl", "val.jsonl" and "test.jsonl"), and the time of creating the KG in August.
 
 ## What time of day to retrain LoRA?
 The training of the model may now be scheduled for an overnight retrain, without burning GPU hours the moment when the emails arrive.  
-
-Monitoring the growth of the row count from "train.jsonl", "val.jsonl', and "test.jsonl", for example, allows us to quantify exactly how much new information (emails) have arrived, and accumulated, before we decide it is time to incur the expense and electricity cost of a fresh training run done to the model, but you can count rows at ingest stage without requiring any digest stage at all : but if you *do* audit this way, remember that the digest stage *is* required to be run before the later stages, and don't forget to run it before pre-LoRA, and LoRA training.
 
 ## What is drift?
 Drift is the gap that opens when the distribution or meaning of data coming in shifts away from what the model was trained/evaluated upon. Think of "data drift" as something that happens when the data being input changes. For instance, if, on a professional mailing list for dental surgeons, a lot of emails arrive talking about fluffy dogs, then this is "data shift" because the vocabulary has shifted.
@@ -385,22 +1294,8 @@ To wire it into your repo, edit `config/alerts.yml` with your SMTP/Slack URLs, a
 
 TO DO. Store state about exlusion backlog + other similar stats on backend (host).
 
-## Why does "bin/mbox_pre-parser.rb" output shard files?
-Recall that "bin/mbox_pre-parser.rb" is being called upon a raw MBOX. Raw mboxes are often one huge file per list history so far, or per month, or per week.  The pre-parser converts the physical MBOX into logical JSONL Rows. A **Logical Row** is the *atom* (one single email or thread entry), while a **Shard** is the *bucket* (the actual .jsonl file holding thousands of those atoms).  The pre-parser outputs shards so that the downstream tools (which are invoked at training time) can process data in parallel chunks instead of choking upon one massive 50GB file.
 
-"bin/mbox_pre-parser.rb" walks messages in order and assigns each one to exactly one part-XXXXXX.jsonl file, so that together the shards are just a clean partition of the body of emails, rather than containing overlapping copies of each other.
 
-"bin/mbox_pre-parser.rb" writes to JSONL shard files (e.g. "emails/part-000001.jsonl"), to the `--output DIR` ("./pre-parsed" by default).
-
-Notice that "bin/window_maker.rb" has an input argument `-i DIR`, so that "bin/splitter.rb" walks over all the sharded pre-parsed files in that directory (the outputs from "mbox_pre-parser.rb"), so that it can deterministically assign whole threads to splits.  Shards are non-overlapping.
-
-## Why do we produce flat files (not sharded) as the output from "bin/window_maker.rb"
-Note that for simplicity, and downstream tooling for the training of LoRA, the outputs from "bin/window_maker.rb" are materialized as single flat files as "train.jsonl", "val.jsonl", and "test.jsonl", as these contain metadata only, and are quite "skinny", and thus require inexpensive disk I/O (input/output) on a modern solid state drive, and interface.  The costly work is the parsing of MBOX files during pre-processing, and the tokenizing of email bodies during training of LoRA.
-
-In our code base there is no ruby file that chops "train.jsonl" into shards ; "bin/window_maker.rb" merely produces one flat "train.jsonl" file for KG, and the actual "sharding", in LoRA training, happens later inside the training stack's data loader (e.g. the finetune script, / vLLM or PyTorch+DeepSpeed job that reads the Alpaca data structures from pre-LoRA training time, and can automatically segregate and allocate each Alpaca training data the across workers at LoRA training time asynchronously).
-
-## When are my unique thread_id's created?  
-These are created by "bin/mbox_pre-parser.rb" ; then, later, "bin/splitter.rb" assigns one deterministic split from these thread ids.
 
 ## What is meant by "windows of a thread"?
 When a thread has 50 messages, but you set `--window-size 20 --window-overlap 5`, "bin/splitter.rb" chunks these messages into overlapping sliding windows (e.g. messages 0-19, then 15-34, the 30-49), such that each training example/chunk stays within a manageable context length, overlapping with other chunks.  Note that we are dealing with, and referencing, metadata here only. The purpose of doing this, is to provide overlapping context between chunks of data passed to the process of training LoRA.  The critical design is that ***all*** of these windows inherit the ***same*** split from their parent thread_id, in order to prevent data leakage ; i.e. if window 0 lands in "test", then window 1 cannot sneak into "train", because this would contaminate the training, and evaluation, of the LoRA adapter.  The context of the conversation within any email thread will ***not*** be shared!
@@ -488,29 +1383,6 @@ If a thread exceeds this limit, then the pre-parser will chop it into smaller "s
 ## What happens if a malicious user sends one email with 50,000 words in it (possibly garbage) in order to attempt to cause the Lookback Horizon, for the training of the model, to exceed the 8192 tokens, which was the limit of the Lookback Horizon (also called the "context window length"), baked into the model?
 This is an astute observational concern, as `--window-size` counts *messages*, not tokens, so a single email with 50k-words (~ 37k tokens) is just "1 message" to splitter.rb, and would cause truncation to 8192 tokens happening downstream at tokenization time.  So to avoid truncation at training time due to a malicious user sending excessively large messages to the mailing list, there exists a token/char limit to each email within `mbox_pre-parser.rb` to reject absurdly long single messages, before they even hit the output from "bin/mbox_pre-parser.rb" (and thus subsequently the manifest).  Doing this at ingest time will also have the added benefit whereby we are protecting RAG from these absurdly long email body lengths too, as, as they never hit the shard files, RAG never sees them. Neither will KG creation see them, as they would *not* be within the input for "bin/splitter.rb" to output.
 
-## Don't suddenly change your splitter seed or configured ratio! 
-"bin/splitter.rb" groups by thread_id, and always hashes with a deterministic seed, to assign train/val/test (80/10/10) to the immutable manifest, writing immutably to "assignments.json".  To say this again, "bin/splitter.rb" assigns per-thread splits using a deterministic hash (seeded) to hit a fixed ratio, so that the inputs always map to the same split in the immutable manifest, unless you change the seed, or configured ratio, which you ***must not*** do midstream because this would invalidate previous assignments ; and if you ***do*** do this then you ***MUST*** recreate the **whole** manifest again and then materialize it (!) effectively wiping the slate clean. 
-
-## Does "bin/splitter.rb" prevent any context leakage across train/val/test?
-Yes!!!
-
-## Does "bin/splitter.rb" append to the manifest file *and* recreate the train/val/test JSONL set files?
-Yes.
-
-## Won't the appending to the whole manifest file every time a new batch/corpus of emails arrives be costly in terms of processing and disk I/O?
-In practice, no. This is because the manifest is just metadata (thread_id, split, cohort_id), not email bodies, so even a million threads is maybe 50-100MB of JSON, which can be appended to quickly.  Even the rewriting to the train/val/test JSONL files will happen quite quickly upon a modern disk. The costly work is the parsing of mbox files, and tokenizing bodies, the latter of which dwarfs the manifest I/O by orders of magnitude. 
-
-## Do the train/val/test JSONL files contain the actual email body as well as the same metadata that the manifest file contains?
-No. They are "skinny".  These files contain exactly the same metadata fields than the manifest do, but *do not* contain the email bodies.  These files serve to window for your KG to then look up the actual content from RAG.  The raw shards are exactly the same `.jsonl` files which are/were generated by "bin/mbox_pre-parser.rb", which contain the actual email-bodies and metadata. "train.jsonl" is just a bunch of metadata from those shard files, and the same can be said of "val.jsonl" and "test.jsonl".
-
-## The emails' encoding
-"bin/mbox_pre-parser.rb" opens the mbox as a read binary. After parsing the inbox to get an array of individual raw emails, and after detaching the attachments for later RAG reference and retrieval, after after extracting the Message-ID, then, for each message, it checks whether the field as `Content-Type: charset` is present within each message, reading the message in the charset specified if it is ; and if this charset field is not present within the email message, we auto-detect the encoding of this email using the `charlock_holmes` gem, whereas if `charlock_holmes` chokes, we assume that the email body is written in UTF-8, in which case we also proceed by replacing unrepresentable bytes with "?".  Otherwise, if we don't do any of this character-set detection, the ruby programming language (which this project is written in) may treat strings within the email as raw bytes (ASCII-8BIT), but JSON (the format within the shard files gets written into) needs valid UTF-8.
-
-If the pre-parser splits a long thread into seperate output shard file, then the fact that the pre-parser, at ingest time, has split this long email thread into separate shard files, means that "bin/mbox_pre-parser.rb" has simply sliced the flat array of raw email messages, held in RAM (random access memory), every 1000 entries (or whatever your `--shard-size M` option is).   
-
-## What is the field as "internal_id" within the output files from "bin/mbox_pre-parser.rb"?
-It is a collision-proof SHA256 hash of the `Message-ID` plus the email body hash, serving as a unique primary key to deduplicate exact content matches, while tracking different versions of the same Message-ID. This means that within an historical inbox of many emails spanning decades, although RFC 2822 says that email Message-IDs should be globally unique, we are protecting ourselves in case two separate email_message body contents arrive (potentially decades apart), with the same Message-ID (a collision) : in which case, the internal_ids would be different, and we don't reject these messages from either RAG, or training LoRA, and we use this internal_id as metadata in training LoRA ; but we *will*, at ingest time, reject exact duplications of the same email (which will have the same internal_id, as the hash of the : Message-ID concatenated with the email body, will be identical).
-
 ## Omitting --window-size N
 Because the physical fragmentation from the pre-parser is invisible to the splitting logic, if the `--window-size N` option to `splitter.rb` is omitted, "splitter.rb" treats each thread as an atomic unit.  
 
@@ -520,7 +1392,7 @@ emails.group_by { |e| e['thread_id'] }
 ```
 *after* loading all shard files into a single flat "emails" array ; and this intentionally reads, but does not preserve, any fragmented sharding from the pre-parser, as far as the processing within "bin/splitter.rb" is concerned, thus ensuring that you always can subsequently window (the verb is "to window") over the full, reassembled conversation.  So even if `--window-size N` is omitted to "bin/splitter.rb", the entire conversation within a thread (all messages sharing a particular "thread_id") lands within a single manifest set, and materializes into one split file (e.g. "train.jsonl"), as "bin/splitter.rb" *does* treat each thread as an atomic unit.  This is the default behaviour.
 
-Note that even if the pre-parser sharded a long thread across multiple output files (e.g., `part-00001.jsonl`, `part-00002.jsonl`) for I/O efficiency when training LoRA, "/bin/splitter.rb" reassembles all messages sharing the same `thread_id` before assignment. Pre-parser sharding is purely a file-size concern.
+Note that even if the pre-parser sharded a long thread across multiple output files (e.g., `part-000001.jsonl`, `part-00002.jsonl`) for I/O efficiency when training LoRA, "/bin/splitter.rb" reassembles all messages sharing the same `thread_id` before assignment. Pre-parser sharding is purely a file-size concern.
 
 ### When to omit `--window-size N`
 
@@ -533,115 +1405,6 @@ LoRA is trained via the Alpaca format produced from email-bodies from the shard 
 
 If I *were* to embed two successive windows of size thirty emails, with a window overlap of, say, five emails, within the Alpaca data structures for training LoRA, then ***all*** the Alpaca data structures from these overlapping five emails will be repeated to the LoRA training.  This would be harmful to LoRA training, as the duplication of these samples would be an example of overfitting.  The model would see those five email patterns multiple times per epoch, weighting them disproportionately.  LoRA's small parameter space would multiply the effects of this overfitting risk, rather than teaching the model the underlying pattern.  We are seeking to avoid teaching the model to memorize specific Gestalt replies, and we are seeking to avoid the model learning how to create plausible sounding text within a vacuum. To disable overlap for the LoRA training is what we do by examining the shard files, instead of the skinny metadata files output from "bin/splitter.rb" : which will be needed in order to use these window overlaps for continuity in the creation of Knowledge-Graph.  The window overlaps will NOT be used for RAG either, as these windows will not be needed for RAG chunking, and text embedding, and indexing within, a vector database! 
 
-RAG has two stages : offline (chunk and embed and index), and online (retrieve and generate).
-
-#### RAG offline stage
-This consists of three phases: CHUNKING, EMBEDDING, and INDEXING.
-
-During CHUNKING, you must chunk your email bodies (e.g. to 512 tokens), and the run each chunk through an EMBEDDING model to obtain a vector. An EMBEDDING model converts text (or images, etc) into a fixed-size vector (typically between 384 to 1536 dimensions). Semantically similar vectors are closer together within the vector space. Then you must store these vectors, plus the text which generated them, within a vector database (FAISS/ChromaDB) with an approximate-nearest-neighbour index for fast lookup. This last stage is called INDEXING.
-
-#### RAG online stage (QUERY TIME)
-This consists of 2 phases: RETRIEVAL and GENERATION.
-
-During RETRIEVAL time (the first part of QUERY TIME), you must embed the user's question by using the same embedding model, and ask the vector database to find the top-K nearest chunks by cosine similarity.  Those raw text chunks will become returned.
-
-During GENERATION time (the second part of QUERY TIME), in this stage, you must take those top-K retrieved raw text chunks, and build a prompt like: 
-```ini
-"Context: [chunk1][chunk2] ... [chunkK]\n\nQuestion: {user query}\n\nAnswer based on the context above." 
-```
-; where the string as "Answer based upon the context above" could equally have been the string as "Based upon the context, respond to:", or "Using only the previously provided passages, answer...". An example prompt is:
- ```ini
- "Alice sent the crash report on March 3rd.  Bob acknowledged it March 4th. The fix was deployed March 7th.\n\nQuestion: When was the crash resolved?\n\nAnswer based upon the context above."
-```
-
-#### RAG synopsis
-So the model (which we have previousy LoRA-trained) sees the chunks, and then the question, and then generates the response.  We are just instructing it to use whatever we gave it.  The model reads the injected context as if it "knew" those facts, generates a grounded answer, and ideally won't hallucinate beyond what the chunks inform it of. The prompt budget matters here.  "K chunks + question + answer" must fit the LLM's context window.  Too many chunks is noise.  Too few chunks is missed information.  A typical K is between 3 to 8.  RAG retrieves unstructured text chunks via vector similarity. It gives us fuzzy semantic hints, such as chunks mentioning "outage", or "segfault", during GENERATION time.  Contrast this to kG (Knowledge-Graphs), which is a graph database with explicit nodes+edges for structured relationships (such as who-emailed-whom-when).  As we already have the metadata for KG stored within our shard files (which were output from "bin/mbox_pre-parser.rb") we can construct a KG, and use both it and RAG for hybrid retrieval. We can also use the super-skinny metadata from the set output file (output from "bin/splitter.rb" during digest time) for windowing within KG creation, obtaining the rest of the metadata for KG creation from the fat shard files. 
-
-In particular, for the two successive stages of the RAG online stage : RETRIEVAL and GENERATION, let's say the query is "When did Alice raise the crash issue with Bob?", then step 1 will be parallel retrieval : KG gives us the hard facts (Alice->Bob edges, interal_ids, thread IDs, timestamps, etc).  RAG gives us those fuzzy semantic hits, based upon those internal_ids returned from KG, and passed to RAG.  Step 2 will be to merge both the output from this hybrid KG to RAG retrieval, into a single prompt.  KG provides structure such as who and when ; RAG answers "what was said" ; and LoRA facilitates the model how to say it, where a vanilla model would fumble.
-
-RAG is still constrained by the embedding model's max tokens (e.g. ~256 tokens for all-MiniLM-L6-v2, or ~8191 tokens for OpenAI text-embedding-3-small), which is *not* an example of an LLM context window (where the "Lookback Horizon" of the vLLM is bounded by the "context window length" of it).  We don't want *any* overlap between the chunks for RAG embedding and indexing, because RAG doesn't need them : instead, for populating the RAG vector DB, we treat our email corpus as one big collection of data.  We chunk each email body, and associate with each chunk this email's metadata ; then we text-embed, and store within a vector database ; and we will now have completed the RAG offline stage. Having overlap between the chunks of email bodies (associated with the same email's metadata) for RAG, is not harmful in the same way that it would be for LoRA training (by overfitting some of the data), but it would be messy data curation, as RAG doesn't specifically learn from duplicates. This approach of having duplicates, which we reject, would bloat storage, resulting in redundant chunks being returned, eating into the top-K budget of the most relevantly returned raw text chunks (which *would* actually detriment our performance, and so in this sense *would* be detrimental).  As a split between chunks mid-sentence is useless in both halves, I say the correct approach is to programatically to test for a fixed size, say 0.7, of the embedding model's max tokens, which, when approached in a wall-of-text (the sender wrote 47 lines without hitting the Enter button twice in a row) chunks upon a sentence boundary near to this 70% mark of the max tokens in this case, whilst otherwise to split upon a paragraph break. This design will incorporate having a look-ahead examination for a wall-of-text, because, just say this wall begins at the 0.5 mark of the max tokens (pertaining to the email body), and this wall-of-text is 50% of the size of the maximum number of the tokens for this embedding model, we want to break the wall-of-text after about 20% (of the size of max tokens), leaving a remaining wall-of-text now 30% (of the size of the max number of tokens for the embedding model), and then start the next chunk upon this breakpoint. We will want this look-ahead to happen iteratively for all chunks of an email's body which span multiple chunks.
-
-TO DO.  implement this kind of a chunker.
-
-#### KG databases
-These store data as nodes+edges.  Nodes are entities, and edges are relationships. Older databases like SQL look up a key within an index in order to find a row, which is of order O(log N) because B-tree indexes are balanced trees, not flat lists. KG databases are "index-free", which means that relationships are not derived at query time via key lookups. Each node stores pointers to its neighbours in memory, or on disk. To traverse a edge, the pointer becomes dereferenced, et viola, you have arrived.  There is no B-tree lookup, and no index scan. So traversing this edge is of order O(1).  Storage is typically adjacency lists, or edge tables, with node-local indexes.
-
-Please note that we do not need to a graph embedding algorithms (TransE, RotateE, ComplEx) to create our ontological embedding to be stored within our KG database, because, as an ontological embedding specifies "how entities connect", we already have this data as metadata within our shard files output from "bin/mbox_pre-parser.rb".  Let us use this metadata to create our ontological embeddings : such data as 
-
-***NODES*** 
-- **Email_Address** : `from`, `to`, `cc`, `reply_to_email_address` ,`reply_to_this_email_address_instead`
-- **Email_ID** : `original_message_id`, `references`, `in_reply_to_message_id`
-- **Attachment** : `attachments`
-
-***PROPERTIES***
-- `subject` `time_stamp`, `has_attachment`, `thread_id`
-
-`attachments` contains the metadata associated with the attachments pertaining to any email. 
-
-A **Directed Acyclic Graph** (DAG) means that edges have direction, and that they have no loops (acyclic), and that you can't follow edges and end up back where you started.  A "Graph" is all the nodes + edges. A References chain is a DAG because emails point forward in time, so we can never cycle back. Note that we will be thinking of constructing the `original_message_id` of the reply email pointing back to each of the References' `original_message_id`s as the  (`References[0]->original_message_id_of_the_reply_message`), in preference than to do so the other way around.  By index-free adjacency, each node stores its outgoing edges with itself.  So node B physically hold a pointer to node A.
-
-A "Tree" is a special case of DAG whereby each node has one parent.  As References edges can be multiple per node, our schema (which we pass to TransE/RotatE/ComplEx) is a DAG, not a Tree. TransE/RotatE/ComplEx learn vector representations for entities and relationships you have *already defined*. The idea is that we will feed it a list of edge triples, like `(original_message_id, EMAIL_WAS_SENT_BY_PERSON, from)`, e.g. (msg-123, EMAIL_WAS_SENT_BY_PERSON, alice@example.com), and it will produce embeddings that encode structural positions. We do the following.
-- 1. We define our ontology: "email addresses are nodes (Person), original-message-ids are nodes (Email), attachments are nodes (Attachment)".
-- 2. We define edge types: PERSON_DID_SEND_EMAIL, EMAIL_WAS_SENT_BY_PERSON, EMAIL_IS_A_REPLY_TO_EMAIL, EMAIL_CONTAINS_THE_ATTACHMENT, ATTACHMENT_BELONGS_TO_THE_EMAIL
-- 3. Build the graph with actual triples: e.g. (email-123, EMAIL_IS_A_REPLY_TO_EMAIL, email-456).
-- 4. Feed that into the embedding model. The model learns that email_123's vector should be close to email-456's vector.
-
-#### Explain KG nodes and edges
-Edges aren't containers containing nodes ; they are labeled arrows *between* nodes.  Think of a city map where buildings are nodes, and one-way streets are edges.  The one-way street connects two buildings.  Edges are the "verbs" such as EMAIL_WAS_SENT_BY_PERSON, EMAIL_IS_A_REPLY_TO_EMAIL, ATTACHMENT_BELONGS_TO_THE_EMAIL.  In the graph we may wish to be having: `(alice:Person)-[:PERSON_DID_SEND_EMAIL]->(email:Email)-[:EMAIL_CONTAINS_THE_ATTACHMENT]->(file:Attachment)`. Here Alice is a node. The email is a node.  The attachment is a node. The arrows between them are edges. Nodes can have properties (`internal_id`, `thread_id`, `subject`, `timestamp`).  Edges can too (`timestamp`).  You query by pattern-matching paths through nodes via edges.  An edge triple is (head, relation, tail), e.g. (email-123, EMAIL_WAS_SENT_BY_PERSON, alice@example.com). TransE models is as h + r ≈ t in vector space.  RotatE rotates h by r to reach t. ComplEx uses complex embeddings to handle asymmetric relations.
-
-References (from the email headers) *contain* Message-IDs of other nodes. The original_message_id (Message-ID) is created (hopefully uniquely) upon every email. The references to previously created Message-IDs are what **edges** are. We put `internal_id`, `thread_id`, `subject`,  as node properties, as these are intrinsic attributes/properties. Properties describe "what a thing is".  Edges describe *who it connects to*.  To explain the EMAIL_WAS_SENT_BY_PERSON edge : the metadata contain a `from` field (containing an email address). So we create an edge between the `original_message_id: "email_message_id_123"` and the `from: "alice@example.com"` fields : such as the edge being `alice@example.com->email_message_id_123`, which was created by `email_message_id_123, EMAIL_WAS_SENT_BY_PERSON, alice@example.com`. This will allow us to ask our hybrid KG retrieval to RAG, such a question as "Show me all the emails EMAIL_WAS_SENT_BY_PERSON alice@example.com", as KG will return the internal_ids, and these will be passed to RAG to retrieve the email-bodies.  Note that we do not duplicate the email-bodies within both KG and RAG, as we are seeking to obey the DRY principle.  We may also wish to ask the question to the hybrid KG-RAG, such as "Show me all the reply emails sent from bob@123.com to alice@999.com", so after collecting all the `original_message_id`s (those sent from bob@123.com via examining `bob@123.com->email_message_id_999`, and the like), we filter these within KG in order to retrieve that which has been previously created as `original_message_id_of_the_reply_message EMAIL_IS_A_REPLY_TO_EMAIL References[0]`, i.e. `References[0]->original_message_id_of_the_reply_message`, for example "<48c6a35b-3667-46d1-9d36-303d1abfe824@xs4all.nl>"->"<432p729s-5n0q-6707-rn2r-1p0p8165099r@hzvpu.rqh>", or `email_message_id_999->"email_message_id_123"`.  We will now have a list of `original_message_id`s (from References[0], References[1], ...) that Bob has replied to.  Then we filter these via examining edges such as `References[0], EMAIL_WAS_SENT_BY_PERSON, alice@999.com`, but note that we are here traversing from `References[0]->alice@999.com`, *not* the other way around : as in our previous question as "Show me all the emails EMAIL_WAS_SENT_BY_PERSON alice@example.com".  To do this we do *not* need to use an LPG (labeled property graph) like Neo4j, Amazon Neptune, or Tigergraph, whereby we would be creating reverse indexes.  Instead we will store edges as double pointers, thus maintaining both directions. We write two edges: `(email_message_id_123)-[:EMAIL_WAS_SENT_BY_PERSON]->(alice@example.com)`, in which case our node would be `(email_message_id_123)` ; and `(alice@example.com)-[:SENT_THE_EMAIL]->(email_message_id_123)`, in which case our node would be `(alice@example.com)`  A node is a unique entity within the graph. Here `(email_message_123)` is a node, not a property upon a node.  Edges connect nodes.
-
-
-#### How to build the KG
-When forming edges for knowledge-graphs we want to use labels at KG creation time.  When the parser sees an email, it creates `(e:Email {Subject: '...', Date: '...', Has_attachments: boolean, })`.  When it sees a sender, it creates `(p:Person {email: 'alice@example.com'})`.  Labels are just tags you stamp on nodes when you make them. `CREATE (e:Email {...})`, where `:Email` is the label. 
-
-To recap, in my KG creation I do `email_message_id_123, EMAIL_WAS_SENT_BY_PERSON, alice@example.com`, and `email_message_id_123, EMAIL_IS_A_REPLY_TO_EMAIL, email-message_id_999`, and `email_message_id_999, EMAIL_WAS_SENT_BY_PERSON, bob@123.com`.  So to answer the prompt query as "Show me all the reply emails sent from bob@123.com to alice@999.com", we trace the path.  "Fred sent email 999, Alice replied to 999 with 123.", query with: 
-
-```
-MATCH (fred:Person)<-[:EMAIL_WAS_SENT_BY_PERSON]-(original:Email)<-[:EMAIL_IS_A_REPLY_TO_EMAIL]-(reply:Email)-[:EMAIL_WAS_SENT_BY_PERSON]->(alice:Person) ;
-WHERE fred.email = 'fred@binom.com' AND alice.email = 'alice@example.com'; RETURN reply ;
-```
-whereby you are walking backwards from Alice's reply to the original, and then confirming that Fred sent it. `original` is just a variable name for the node matched by the `:Email` label in that position ; it is the email sent by Fred, which Alice replied to.  The pattern says: find a node (labeled Email) that has a `EMAIL_WAS_SENT_BY_PERSON` relationship to `fred`, and call that node the `original` message.
-
-Node2Vec is transductive, whereby it will learn one vector per *existing* node via a biased random walk through our DAG.  It does random strolls through our email graph, collecting thousands of sequences.  Then Word2Vec notices patterns appearing within these sequences, and their frequency, assigning similar vectors to things that keep showing up near to each other.  It is not useful for our use case, as chains of (hopefully) unique `original_message_id`s such as [id23432, id452423, id87873, id871123] will not repeat, nor will edges between email addresses and unique message ids. 
-
-GraphSAGE would learn *aggregate functions* instead of node-specific vectors. When a new vector arrives we run the learnt aggregator upon its neighbours, to get a vector without rebuilding KG all over again.  Although this would be good for pipelines where cohorts grow incrementally, it would not be able to deal with DSR requests, so I reject its use.
-
-We want to have structural metadata, including the filename of attachments, their MIME type, size, and attachment_id, within the KG, which will report deterministically facts about "what exists".  We will not extract text content from attachments within RAG, because there would be technical difficulties if attachments are not readily parseable, and this level of granularity is too much, I say, and would populate our search data with random crap from the non-parseability, or non-standard parseability, of myriad, potentially password-protected, attachment files from sent emails.  By avoiding this level of absurd granularity, we don't have to worry about whether the email contains a binary, or non-binary, attachment, as a data-level concern.  Look.  This whole project was supposed to be a data curation program for the text content and metadata from an MBOX.  There are myriad projects out there which are all about AI examining multiple data formats, and parsing them.  These projects will add a lot of latency time to the AI inference prompt when we use it.  Therefore I reject this idea as a waste of time, and and waste of effort. The `has_attachment` metadata on any node in KG, should link from the `internal_id` to the `has_attachment` field.  So, if the query pattern is "Find attachments pertaining to emails about finances", for a valid hyrid query, we want KG to filter out those `internal_id`s which have email attachments associated with them, and then we pass those `internal_id`s to RAG, for RAG to semantically search.  Note that KG passes its metadata (as `internal_id`, `original_message_id`, `references`, `from`, `thread_id`, `timestamp`, `subject`, `has_attachment`, and `attachments`) to RAG, so that RAG can reference this metadata (such as `attachments[0].unique_attachment_id`) with or without performing a semantic search upon the content of the email body. KG is a structural filter. RAG is a semantic filter. I find the idea of RAG to be referencing and accessing the metadata pertaining to the attachments to be a clean way to work, because we don't need to worry about KG having the opportunity to do so.  If we were to only ever need to "list attachments of this email", then we could `CREATE (e.Email {Subject: "Hello", Date: datetime(), Has_attachments: true, Attachments: ["file.pdf", "img.png"]})`, but we may wish to enable the user to query *across* emails, in such a prompt as "find all the pdfs Bob sent", in which case attachments should be separate nodes with properties like `filename`, `unique_attachment_id`, `attachment_size`, and `attachment_content_type`.  These attachment nodes should be separate nodes `(a:Attachment)-[:BELONGS_T0]->(email)` which first can be created (with associated properties) like any other node:
-```cypher
-CREATE (a:Attachment {
-  unique_attachment_id: 'att-abc-123',
-  filename: 'report.pdf',
-  attachment_size: 204800,
-  attachment_content_type: 'application/pdf'
-})
-```
-Secondly, we link to the parent email:
-```cypher
-MATCH (e.Email {Message_ID: 'msg-123'})
-CREATE (a:Attachment {
-  unique_attachment_id: 'att-abc-123',
-  filename: 'report.pdf',
-  attachment_size: 204800,
-  attachment_content_type: 'application/pdf'
-})-[:ATTACHMENT_BELONGS_TO_THE_EMAIL]->(e)
-```
-Now you can query: "all pdfs larger than 1MB", or "emails with attachments of type image/png", or "who sent the most spreadsheets?". These traversals are impossible with flat array properties.  Cypher is the query language for neo4j. When creating KG from scratch (which is necessary to remove DSRs) we will need to recreate our attachment nodes from a blank canvass and link them to the parent node of each.
-
-When new corpora of emails arrive and we wish to add them to KG, without enacting any DSRs, it is not necessary to recreate/rebuild the whole KG from scratch.  We can prevent deduplicates when we reparse by doing
-```cypher
-MATCH (e.Email {Message_ID: 'msg-123'})
-MERGE (a.Attachment {unique_attachment_id: 'att-abc-123'})
-SET a.filename = 'report.pdf',
-    a.attachment_size = 204800,
-    a.attachment_content_type = 'application.pdf'
-MERGE (a)[:ATTACHMENT_BELONGS_TO_THE_EMAIL]->(e)
-```
-MERGE is an idempotent upsert : it won't duplicate attachment nodes if the same attachment is already with KG. An idempotent operation will produce the same result no matter how many times it is applied, preventing unintended side-effects when repeated.
-
-#### Why KG *needs* the windowing from the email threads.
-
-Without windowing by thread_id, the main unavoidable danger to the creation of my knowledge-graphs, is that the reply-to edges may cross arbitrary batch boundaries, and become missed.  This would lose context for "who replied to whom, and when" : which is the whole purpose of KG.  Batch boundaries are artificial cuts in your data stream.  If I have windows of size 30, from the same thread of 200 emails, *without* any overlap between these windows for KG creation, then E30 replies to E29, which is captured, but when E31 replies to E30, this may result in a broken edge, because E30 and E31, which are within different windows, are processed independently. E30 lands in batch 1, and E31 in batch 2. There is no guarantee of the order in which these batches are started or completed, asynchronously. If we did omit the window-overlap to the KG creation, then our reply chain would become 6 disconnected subgraphs, instead of one 200-thread.  This absence of overlap would prevent edge continuity in KG.  This scenario must be avoided by using the windowing of email threads. We already have the metadata for this from the digest stage of our data curation. 
 
 ## So what exactly *are* we doing within "mbox_pre-parser.rb"?
 We are:
@@ -661,91 +1424,7 @@ Then for each email we:
 
 TO DO implement stage 12 (collision_triage file containing internal_ids and original_message_ids of collisions).
 
-## The "generic_DSR_record_manifest.jsonl" file output by "bin/dsr_change.rb".
-I also want to have an immutable (append-to only) "generic_DSR_record_manifest.jsonl" file, within the same directory as the "manifest_file_of_inputted_mboxes.jsonl" (in this case `./raw_mbox_files`) which is of the format as:
-```jsonl
-{
-  "dsr_id": "dsr-2026-00042",
-  "dsr": "delete",
-  "email_of_dsr": "bob@x.com",
-  "requestor_type": "data_subject",
-  "jurisdiction": "GDPR",
-  "requested_at": "2026-03-20T10:00:00Z",
-  "processed_by": "admin_alice",
-  "completed_at": "2026-03-24T18:00:00Z",
-  "confirmation_sent_at": "2026-03-24T18:05:00Z",
-  "confirmation_sent_to": "BobSmith@456.com",
-  "reason": "user_request",
-  "comments": "Requested via support ticket #12345"
-}
-```
-The useful fields are : "dsr_id" for cross-referencing, "processed_by" for audit trails, "completed_at" to prove you honored the 30-day GDPR deadline, "jurisdiction" if you ever deal with GDPR vs CCPA vs other regimes. "confirmation_sent" is often legally required : you must tell the subject you complied. The rest is nice to have depending on how much audit pain you want to avoid later. In a different framework, "scope" may be required to distinguish "delete my account" from "delete this one email", but as we are not dealing with accounts, and only emails, the abscence of a "scope" field is tacitly understood to mean `"scope": "email_only"`.
 
-Thus our directory listing of `./raw_mbox_files` may look like: 
-```bash
--rw-rw-r--   1 dmr104 dmr104   9728 Mar 11 14:33 DSR_generic_record.jsonl
--rw-rw-r--   1 dmr104 dmr104  27965 Jan 15 05:23 manifest_file_of_inputted_mboxes.jsonl
-drwxrwxr-x   2 dmr104 dmr104   4096 Nov  9 12:42 until_2026-03-24T18:47:00Z_00002/a.mbox
-```
-
-TO DO 
-
-Implement this DSR immutable manifest being output from a "bin/dsr_change.rb" file which will incorporate the command argument "access" and "delete" well ; "access" will "give the user all data we have upon him/her", and "delete" will add an entry to the "generic_DSR_record_manifest.jsonl". The "dsr-id" will be incremented automatically, as will "completed_at" be calculated automatically. "bin/dsr_change.rb" will require the options as `--email_of_dsr "bob@x.com" --requested_at "2026-03-20T10:00:00Z" --processed_by: "admin_alice" --confirmation_sent_to "BobSmith@456.com" --reason: "user request", --comments: "Requested via support ticket #12345"`.  The option as `--confirmation_sent_at: "2026-03-24T18:05:00Z"` will be optional.  This is to faciliate the possiblity that an email was manually set to BobSmith@456.com, whereas if this option is omitted, then mboxMinerva should automatically send him an email while filling in the "confirmation_sent_at": "2026-03-24T18:05:00Z" field within "generic_DSR_record_manifest.jsonl" automatically. 
-
-TO DO.  Implement this logging facility. post record of tombstones to logs/tombstones.jsonl with who/what + timestamp + reason ; audit logs to logs/audit.jsonl recording each attempt to train LoRA with a record of keys (who/what) within the tombstones which apply to the training session, i.e. the X,Y,Z within the audit.jsonl reference the same key identity (who/what) within the tombstones.jsonl.  check whether bin/dsr_delete actually writes these tombstone records.  
-
-Implement a way to query the jsonl data structure of "generic_DSR_record_manifest.jsonl", via "bin/dsr_change.rb list", which will list an output on STDOUT which includes 
-```txt
-DSR deletion request by <email> at <timestamp>
-DSR access request by <email> at <timestamp>   
-``` 
-where "<timestamp>" is in a human readable form ; while `bin/dsr_change.rb list -v` produces
-```text
-DSR deletion request by <email> at <timestamp> with the reason as : <reason> ; and the comment as <comment>
-DSR access request by <email> at <timestamp> with the reason as : <reason> ; and the comment as <comment>
-```
-while `bin/dsr_change.rb list -vv` produces
-```jsonl
-{
-  "dsr_id": "dsr-2026-00042",
-  "dsr": "delete",
-  "email_of_dsr": "bob@x.com",
-  "requestor_type": "data_subject",
-  "jurisdiction": "GDPR",
-  "requested_at": "2026-03-20T10:00:00Z",
-  "processed_by": "admin_alice",
-  "completed_at": "2026-03-24T18:00:00Z",
-  "confirmation_sent_at": "2026-03-24T18:05:00Z",
-  "confirmation_sent_to": "BobSmith@456.com",
-  "reason": "user_request",
-  "comments": "Requested via support ticket #12345"
-}
-```
-With an --output option as `bin/dsr_change.rb list --output ./myDSRlog` we will output to a file instead of the default STDOUT.  
-
-We want `bin/dsr_change.rb --input "another_DSR_manifest.jsonl` to read from a different DSR manifest file, in order to infer that 
-```
-"This particular LoRA (reference name) was trained after DSR removed X, Y, Z", 
-```
-
-We also want to have a `bin/dsr_change search --email bob@456.com` to produce output just relating to this user's email address.
-
-END_OF_TO_DO
-
-TO DO 
-Remember to save a copy of the "generic_DSR_record_manifest.jsonl", with a unique name, in the same directory as where the new LoRA layer will reside, so we can query it to infer "This particular LoRA (reference name) was trained after DSR removed X, Y, Z", although the output from "bin/dsr_change.rb" won't be significantly different in appearance than before.
-
-## "bin/dsr_processor.rb" outputs the dsr immutable manifest file as "expanded_DSR.jsonl"
-This file contains the "internal_id"s which are to be filtered and omitted from LoRA training, RAG, and KG.  This file MUST have an "original_message_id" associated with the "internal_id" so that KG can do its KG creation (from "train.jsonl", "val.jsonl", and "test.jsonl") using the "original_message_id"s (which also appear in "references") as nodes, and yet return the "internal_id" of a relevant hit during KG retrieval.  KG will omit those nodes which are tombstoned within "expanded_DSR.jsonl" : KG will not create nodes with these tombstoned "original_message_id"s, hence the associated "internal_id" will not be returned to RAG to be searched semantically, and RAG will not contain these email bodies associated with these tombstoned "internal_id"s anyway.  When KG creation uses "references" (previously extracted from the "References:" email header) it omits the node as "original_message_id"  from within this list of "references", which was associated with a particular "internal_id" within "expanded_DSR.jsonl", and it also omits to create a node with this "original_message_id" which is "in-reply-to" this particular "reference" value.  Both ends (nodes) are not created within KG. Obviously to omit creation of the latter is easy : the node is skipped when a particular "internal_id" from "train.jsonl", "val.jsonl", or "test.jsonl" matches that from within "expanded_DSR.jsonl". But as the "references" values are "original_message_id"s (not "internal_id"s), each of the "references" values will need to be compared to the "original_message_id" values contained within the "expanded_DSR.jsonl" in order to decide whether to omit the creation of this particular node within KG creation.  A Message-ID collision is where two separate email bodies (perhaps sent years, or decades, apart) share the same Message-ID (which is a field within the email header). It is a rare event, which hopefully should not occur, but it might do so.  If, and when, it does occur, by our prior algorithmic logic (within "bin/mbox_pre-parser.rb"), the "internal_id"s of these two messages, which collide upon the Message-IDs, will be different. So. A Message-ID collision will have two Message-IDs the same : that is, the "original_message_id"s will be the same.  This will be bad for KG creation as the "original_message_id" is used as a node within it.  Is there a defensive procedure we could use to guard against this case and scenario?  Well yes. We already have a "collision_triage" file which was output from "bin/mbox_pre-parser.rb" which contains the offending "original_message_id"s. So we can utilize this information within the KG creation algorithm in the following way.  If the node we are creating from the data within "train.jsonl", "val.jsonl", or "test.jsonl" has an "original_message_id" which is offending, then we utilize the "internal_id" in this node creation instead.  This applies to both scanning the values within "references" to create a node (References[0]->non-offending_message_id) and also it applies to the creation of a node extrapolated from the "in-reply-to" field (offending_message_id->References[0]).
-
-## Shard file output from "bin/mbox_pre-parser.rb"
-These have ***no*** record of DSRs. They are fat : they contain the email body and *all* the metadata which is extracted from the mbox, which was deemed relevant.
-
-## "bin/splitter.rb" outputs immutable manifest file as "assignments.jsonl"
-This file as "assignments.jsonl" contains ***no*** windowing, and contains ***no*** DSR records. It MUST contain metadata as "internal_id" and its "thread_id". All other metadata to be used within KG creation is extracted from the shard files, by looking up the "internal_id" within these shard files.
-
-## What does "bin/window_maker.rb" do?
-This reads from "assignments.jsonl", filtering out all DSRs from "expanded_DSR.jsonl", outputting the (optionally) windowed pool files "train.jsonl", "val.jsonl", or "test.jsonl" from "assignments.jsonl".  
 
 ## LoRA training.
 The "internal_id"s from "expanded_DSR.jsonl" are filtered from those from "assignments.jsonl", and the email bodies with these ids are ommitted from pre-LorA and LoRA training.
@@ -777,7 +1456,7 @@ TO DO.  ensure that the immutable manifest files "assignments.json" and "expande
 - 12. Print summary stats.
 
 ## Using --window-size n
-At ingest stage, the shard files output from "bin/mbox_pre-parser.rb" have *no* segment-awareness (they are not windowed) ; among other things, "bin/mbox_pre-parser.rb" creates an internal_id, comprising a hash of the email (message_id + email_body), enforcing that this internal_id must be unique, and it also prevents exact duplications entering the shard files.
+At ingest stage, the shard files output from "bin/mbox_pre-parser.rb" have *no* segment-awareness (they are not windowed) ; among other things, "bin/mbox_pre-parser.rb" creates an internal_id, comprising a hash of the email (message_id + message_body), enforcing that this internal_id must be unique, and it also prevents exact duplications entering the shard files.
 
 When "bin/splitter.rb" reads these shard files by `Dir.glob("*.{json,jsonl}")`, it would be pointless for it to group *all* loaded messages by thread_id, because the overwhelming majority of these shard files will have already been processed by "bin/spliter.rb" resulting in their inclusion within the immutable manifest file as "assignments.jsonl".  So what will happen instead, is that within the same directory as the shard files, we will also have "shard_splitter_manifest" file which will indicate which of these shard files will have already been processed, and so we simply process those newer files which have not already been indicated as having been processed.
 
@@ -801,7 +1480,7 @@ All windows derived from a single thread inherit the **same deterministic split*
 | **Semantic windowing** | `splitter.rb --window-size N` | This is a training concern. It chunks threads to fit a transformer context window |
 
 ## How will new batches of emails arriving not result in previous shards becoming overwritten?
-By default "mbox_pre-parser.rb" resets the filename index to 1 for every run, so it *will* overwrite the file as "part-00001.jsonl" if you point it at the same folder, but will prevent you from doing this unless you use the --force option, and even then it will warn you about this unless you use the --yes option also.  You should output each new batch to a unique subdirectory (e.g. `--output my_project/pre_parsed/2026-01-05`) so that your library grows without collisions, while "bin/splitter.rb" still loads everything via its input glob ; so `ruby mbox_pre-parser.rb my_project/emails/2026-01-01/ --output-dir my_project/pre_parsed/until_2026-01-01/` and `ruby mbox_pre-parser.rb my_project/emails/2026-01-15/ --output-dir my_project/pre_parsed/until_2026-01-15/` will both be read by "bin/splitter.rb" by the code
+By default "mbox_pre-parser.rb" resets the filename index to 1 for every run, so it *will* overwrite the file as "part-000001.jsonl" if you point it at the same folder, but will prevent you from doing this unless you use the --force option, and even then it will warn you about this unless you use the --yes option also.  You should output each new batch to a unique subdirectory (e.g. `--output my_project/pre_parsed/2026-01-05`) so that your library grows without collisions, while "bin/splitter.rb" still loads everything via its input glob ; so `ruby mbox_pre-parser.rb my_project/emails/2026-01-01/ --output-dir my_project/pre_parsed/until_2026-01-01/` and `ruby mbox_pre-parser.rb my_project/emails/2026-01-15/ --output-dir my_project/pre_parsed/until_2026-01-15/` will both be read by "bin/splitter.rb" by the code
 ```ruby
 pattern = File.join(input_path, '**', '*.{json,jsonl}')
 files = Dir.glob(pattern)
@@ -991,7 +1670,7 @@ Each JSONL line should be one training example (input + output pair), so every r
 So I can successively combine the previous message as "history", with a specific quoted text from the present message as "input", and have the non-quoted text from the present email message as "output".  I can do this for every email in a thread with the apex original fanning out a pyramid structure.  I will not omit the apex vertex from the training as this does have the original email body within its "input" field.  I say I should not require to inform LoRA of the email reference metadata, or the in-reply-to metadata (which are useful for RAG and KG) because this data would be superfluous to how the AI neural network operates.
 
 ## A proposal
-I was thinking about, at pre-LoRA training time (not at ingest time, nor at digest time), a boilerplate file created (via "weak supervision") which contains stats about cribs (email signoffs, PIIs, "many thanks", etc.) so that state (pertaining to these cribs) can be retained between training runs (not regenerated totally each training time of LoRA). Then do a simHash on the email_body after crib removal, keeping a record of each simHash for each email_body (after crib substitution by intelligible placeholders and >+ removals). 
+I was thinking about, at pre-LoRA training time (not at ingest time, nor at digest time), a boilerplate file created (via "weak supervision") which contains stats about cribs (email signoffs, PIIs, "many thanks", etc.) so that state (pertaining to these cribs) can be retained between training runs (not regenerated totally each training time of LoRA). Then do a simHash on the message_body after crib removal, keeping a record of each simHash for each message_body (after crib substitution by intelligible placeholders and >+ removals). 
 
 Now we have the data to do the inspecting of the Hamming distance between emails.  This is done so that we can ignore both cribs and duplicates *between* threads, for Alpaca and ML, so that downstream training of LoRA can ignore verbatim content (or near-verbatim content) which was copied between email threads. This, hence, will hopefully assist towards prevention of contamination between our sets/pools.  Stripping boilerplate before simhash means we are comparing actual content semantics, not just shared label signatures ;  though we need to make sure that our simhash Hamming distance threshold is correctly tuned on, because the "correct" cutoff varies wildly by domain (emails can be legitimately similar without being duplicates). Contamination is primarily about **verbatim or near-verbatim overlap**, not semantic similarity, i.e. not upon *content meaning* but upon *verbatim content*.  We don't want the model memorizing exact text from "train" that appears in "val", artifically inflating your metrics.  The same applies to exact text from "train" appearing both in "train" and within "test". 
 
@@ -1033,7 +1712,7 @@ To catch near-duplicates prior to LoRA training time *between* threads, not *wit
 ## What are we *will* doing at pre-LoRA training time (i.e. not within "mbox_pre-parser.rb") shall be:
 
 - i. Creating a boiler_plate dictionary of cribs and repeated patterns from our email bodies by using a weak supervision llm inference, not frequency analysis.
-- ii. Dynamically removing cribs and boilerplate duplications from the email_body (the result to be kept in RAM) before fingerprinting this modified email_body (with the cribs excised) using simHash for fuzzy dedupe. 
+- ii. Dynamically removing cribs and boilerplate duplications from the message_body (the result to be kept in RAM) before fingerprinting this modified message_body (with the cribs excised) using simHash for fuzzy dedupe. 
 - iii. Performing fuzzy deduplication on these fingerprints, so that the creation of the Alpaca format, pertaining to inter-thread messages which are too near to each other in content, doesn't happen. This would have been done to avoid training upon absurd messages like "thankyou" or "cheers", and so that similar messages won't appear both in the "train" and "val" sets, nor in "train" and "test". Note that this has nothing to do with the metadata that gets put into the manifest file.
 
 We will *NOT* be doing any of this at the ingest time (in favour of doing it at pre-LoRA training time), because within such a failed, and rejected, proof of concept as doing it at ingest time, we would have used "fuzzy dedupe" in fingerprints at the pre-parser stage, after crib removal, in order to *not* include these similar messages within the JSONL output shard files from "mbox_pre-parser.rb" ; and hence the metadata for these similar messages would not be able to have gotten put into the manifest file!  We reject this approach because:
