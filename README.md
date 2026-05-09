@@ -265,3 +265,96 @@ If you use mboxMinerva in your research, please cite:
 **Result**: Scientifically reproducible, incrementally trainable, privacy-safe email AI.
 
 
+# Rejected works
+
+## Within the "input" field, can I have multiple quote blocks and responses to that previous email?
+That is the question! Email replies often interleave multiple quote blocks and responses, and you naturally would wish to interleave this, and not repeat the previous email, for each repetition. This is in order not to break the DRY (don't repeat yourself) principle in data structures.  There appears to be 2 methods within the AI industry currently of doing this that I know of.  One is called ShareGPT and the other is called ChatML.  I don't think that either are programmatically viable in terms of data curation, so I will break the DRY principle on this occasion. 
+
+
+### ChatML format used in OpenAI models:
+```
+chat_template = """<|im_start|>system
+{SYSTEM}<|im_end|>
+<|im_start|>user
+{INPUT}<|im_end|>
+<|im_start|>
+{OUTPUT}<|im_end|>"""
+```
+I really don't like this because:
+- 1. We are adding a lot of tags like <|im_start|> to what essentially appears to be a text string.
+- 2. Is this whole concept going to become obsolete and superceded soon?
+- 3. Would it be as effective at ML (machine learning) than repeating the previous email within the "history" field would be for each (latest) reply-to quotation "input" field, taken from within the present email, in association with the most recent unquoted text from the present email : as the value of the "output" field?
+- 4. Is the robot which uses the inference llm going to be hackable if I take this approach?  (I have seen people attempt to use these tags as commands to adversely affect robots in public IRC rooms).
+
+### ShareGPT Supervised fine-tuning:
+This looks equally to be some kind of a bizarre data structure which some script-kiddy has just thought of, because, really, things *can* be written into JSON like this, however non-descript it may appear. It looks like:
+```json
+[
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "something in Chinese"
+      },
+      {
+        "from": "function_call",
+        "value": "{\"name\": \"generate_invoice\", \"{arguments}\": {\"more_infernal_stuff\": [{\"oh_no\"}: \"plonk\"]} }"
+      },
+      {
+        "from": "observation",
+        "value": "{\"invoice_id\": \"INV12345\", \"{items}\": {\"this_is_crazy\": [{\"oh_yes\"}: \"exactly\"]} }"
+      },
+      {
+        "from": "gpt",
+        "value": "more Chinese"
+      }     
+    ],
+    "tools": "[{\"name\": \"generate_invoice\", \"description\": \"I_DO_NOT_CARE_FOR_THE_REST\", \"parameters\": {\"give\", \"me\", \"strength\"}}]"
+  }
+]
+```
+The bottom line is that this is far from an easy data structure to utilize, or create.  Let's just break DRY for the purposes of data curation by ML, and be done with this absurdity.
+
+## What we shall do with Alpaca
+email 1 is:
+```
+What is the price of a hamburger?
+What is the price of a cheeseburger?
+What is the price of fries?
+```
+email 2 is:
+```
+>What is the price of a hamburger?
+$4.25
+>What is the price of a cheeseburger?
+$4.75
+>What is the price of fries?
+$2.50
+```
+email 3 is:
+```
+> > What is the price of a cheeseburger?
+> $4.75
+Infation just happened: now $4.80
+```
+So we will have in our JSONL
+```jsonl
+{"instruction": "Reply to this email professionally.", "input":"What is the price of a hamburger?\nWhat is the price of a cheeseburger?\nWhat is the price of fries?\n> What is the price of a hamburger?", "output": ""}
+{"instruction": "Reply to this email professionally.", "history":"What is the price of a hamburger?\nWhat is the price of a cheeseburger?\nWhat is the price of fries?\n> What is the price of a hamburger?", "input": "> What is the price of a hamburger?", "output": "$4.25"}
+{"instruction": "Reply to this email professionally.", "history":"What is the price of a hamburger?\nWhat is the price of a cheeseburger?\nWhat is the price of fries?\n> What is the price of a cheese burger?", "input": "> What is the price of a cheeseburger?", "output": "$4.75"}
+{"instruction": "Reply to this email professionally.", "history":"What is the price of a hamburger?\nWhat is the price of a cheeseburger?\nWhat is the price of fries?\n> What is the price of fries?",  "input": "> What is the price of fries?", "output": "$2.50"}
+{"instruction": "Reply to this email professionally.", "history":"> What is the price of a hamburger?\n$4.25\n> What is the price of a cheeseburger?\n$4.75\n> What is the price of fries?\n$2.50", "input": "> > What is the price of a cheese burger?\n> $4.75", "output": "Inflation just happened: now $4.80"}
+```
+Notice that we are not overly-complicating things. Note also that within the "input" field within our JSONL line derived from email 3, we have "> > " preceding the first line of quoted text, but within the "history" field of the very same JSONL line, there is only one "> " preceding the same line as "What is the price of a cheeseburger?". 
+
+## A pyramid
+Each JSONL line should be one training example (input + output pair), so every reply in the thread gets its own line.  I will describe this as "apex fanning out" : by which I mean that you might get multiple lines where the same parent message appears in different inputs, paired with different sibling replies as outputs, which teaches varied response styles.  
+
+So I can successively combine the previous message as "history", with a specific quoted text from the present message as "input", and have the non-quoted text from the present email message as "output".  I can do this for every email in a thread with the apex original fanning out a pyramid structure.  I will not omit the apex vertex from the training as this does have the original email body within its "input" field.  I say I should not require to inform LoRA of the email reference metadata, or the in-reply-to metadata (which are useful for RAG and KG) because this data would be superfluous to how the AI neural network operates.
+
+## Tell me about *how* we will chunk our message_body's.
+We don't want *any* overlap between the chunks for Vector embedding and indexing, because Vector doesn't need them : instead, when we are populating the non-DPR Vector DB, we treat our email corpus as one big collection of data.  We chunk each email body, and associate with each chunk this email's metadata ; then we text-embed, and store this embedded vector within a non-DPR Vector database ; and we will now have completed the Vector DB offline stage. 
+
+To have overlap between the chunks of email-bodies (associated with the same email's metadata) for Vector, is not as harmful in the same way that it would be for LoRA training (by overfitting some of the data), but it would be messy data curation, as a Vector DB doesn't specifically learn from duplicates. This approach of having duplicates, which we reject, would bloat storage, resulting in redundant chunks being returned, eating into the top-*k* budget of the most relevantly returned raw text chunks (which *would* actually detriment our performance, and so in this sense *would* be harmful).  As a split between chunks mid-sentence is useless in both halves, I say, the correct approach is to programatically to test for a fixed size, say 0.7, of the embedding model's max tokens, which, when approached in a wall-of-text (the sender wrote 47 lines without hitting the Enter button twice in a row) chunks upon a sentence boundary near to this 70% mark of the max tokens in this case ; whilst otherwise to split upon a paragraph break. This design will incorporate having a look-ahead examination for a wall-of-text, because, just say this wall begins at the 50% mark of the max tokens (pertaining to the email body), and this wall-of-text is 70% of the size of the maximum number of the tokens for this embedding model, we want to break the wall-of-text after about the next 20% (of the size of max tokens) within the next chunk, leaving a remaining wall-of-text now of about 50% of the size of the max number of tokens for the embedding model (which is calulated by 0.7 - 0.2), and then start the next chunk (the third chunk) upon this breakpoint. We will want this look-ahead to happen iteratively for all chunks of an email's body which span multiple chunks. It is a moving window where we are aiming for the 70% size of a max token of the embedding model each time but might miss by give or take 20%. We need within this algorithm the guarantee that we will never make each chunk exceed the 90% of this max token constant.  This algorithm is a type of sliding window.
+
+TO DO.  implement this kind of a chunker.  "bin/chunker_for_vector_db"
