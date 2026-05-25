@@ -14,30 +14,30 @@ MBOX files are just dumb records, as flat lists of emails, stored in the order o
 |   mboxes committed section    |
 +-------------------------------+
             | mbox_pre-parser.rb
-            v         INGEST TIME           
+            v                          INGEST TIME
 +----------------------------------------------------------+  +-------------------------+ 
-|               pre-processed shard files                  |<-| spotchecking to triage  |
+|               pre-processed shard files                  |<-|  spotchecking to triage |
 +-------------------------------+--------------------------+  +-------------------------+
-            |                       |             |  |     |
-            v                       |             |  |     |
-+-------------------------------+   |             |  |     |
-|  manual exclusions and DSRs   |   |             |  |     | 
-+-------------------------------+   |             |  |     |
-|           |    window_maker.rb|   |             |  |     |
-|  DIGEST   |         +---------+   |             |  |     |
-|  TIME     |         | windows |   |             |  |     |
-|           |         +---------+   |             |  |     |
-v           v                   |   |             |  |     |
-+-----------+                   |   |             |  |     |     
-|  chunker  |                   |   |             |  |     |     
-+-----------+                   |   |             |  |     |     
-|           |                   |   |             |  |     |     
-v           v                   v   v             v  |     |
-+--------+  +------+     +----------+   +---------+  |     |
-| Vector |  | BM25 |     |    KG    |-->| threads |  |     |
-+--------+  +------+     +----------+   +---------+  |     |
-                                        |            |     |
-                                        v            v     |
+            |                       |                      |
+            v                       |                      |
++-------------------------------+   |                      |
+|  manual exclusions and DSRs   |   |                      | 
++-------------------------------+   |                      |
+|           |    window_maker.rb|   |                      |
+|  Sieve    |         +---------+   |       DIGEST         |
+|    &      |         | windows |   |       TIME           |
+|  Butcher  |         +---------+   |                      |
+v           v                   |   |                      |
++-----------+                   |   |                      |     
+|  chunker  |                   |   |                      |     
++-----------+                   |   |                      |     
+|           |                   |   |                      |     
+v           v                   v   v                      |
++--------+  +------+     +----------+   +---------+        |
+| Vector |  | BM25 |     |    KG    |-->| threads |        |
++--------+  +------+     +----------+   +---------+        |
+                                        | splitter.rb      |
+                                        v                  |
                                         +------------+     |
                                         | Pool files |     |
                                         +------------+     |     
@@ -48,18 +48,26 @@ v           v                   v   v             v  |     |
                                  +-------------------------+
                                              |
                                              v                                      
-                                     +--------------+ 
-                                     | Alpaca files | 
-                                     +--------------+ 
+                                 +--------------+
+                                 | Alpaca files |
+                                 +--------------+
                                              |
+                                      fuzzy  |
+                                      dedupe |
                                              v
+                                 +----------------+
+                                 | decontaminated |
+                                 | Alpaca files   |
+                                 +----------------+
+                                             |
+                                             v 
                                  +-------------------------+
                                  |    LoRA training        |
                                  +-------------------------+
 ```
 
 ## What are the "shard" files?
-At ingest stage, the shard files output from "bin/mbox_pre-parser.rb" have *no* segment-awareness (they are not windowed) ; among other things, "bin/mbox_pre-parser.rb" creates an `internal_id`, comprising a hash of the email (message_id + message_body), enforcing that this `internal_id` must be unique, and it also prevents exact duplications entering the shard files.  "bin/splitter.rb" reads these shard files by reading the "threads" data structure output by KG WCC. 
+At ingest stage, the shard files output from "bin/mbox_pre-parser.rb" have *no* segment-awareness (they are not windowed) ; among other things, "bin/mbox_pre-parser.rb" creates an `internal_id`, comprising a hash of the email (`original_message_id` + `message_body`), enforcing that this `internal_id` must be unique, and it also prevents exact duplications entering the shard files.  "bin/splitter.rb" reads these shard files by reading the "threads" data structure output by KG WCC. 
 
 The shard files output from "bin/mbox_pre-parser.rb" are JSONL files, where each row is a single JSON object containing keys like: `message_ingested_at, internal_id, mime_version, content_type_outer, char_set_outer, from, to, cc, reply_to_email_address, reply_to_this_email_address_instead, references_as_message_ids, in_reply_to_message_id, subject, alleged_timestamp_sent, timestamp_received, has_attachments, attachments, original_message_id, message_body`. The values of all these metadata keys (key-value pairs) have the type of value as string, with the exceptions of the field as `has_attachments`, which is a Boolean value, and with the exception as the field as `references_as_message_ids` (which is an array of strings), and also that of the field as `attachments` : which is an array containing the metadata pertaining to each of the attachments within this email : which attachments are stored externally with a filename and with a `unique_attachment_id`.  
 
@@ -130,7 +138,7 @@ def extract_attachments(raw_email, internal_id = nil)
 end
 ```
 
-Of course, filename collisions can occur on the backend storage. We solve this problem by using the `unique_attachment_id` as the storage path, not the filename. Let us just say that `unique_attachment_id` has the value as "att-abc-123".  We can store the file as `/attachments/att-abc-123`.  Now if two emails have an attachment named `report.pdf`, the different `internal_id`s lead to different paths, and no collision.  The `unique_attachment_id` is your filesystem key ; the filename is just metadata you display back to the user.  
+Of course, filename collisions can occur on the backend storage. We solve this problem by using the `unique_attachment_id` as the storage path, not the filename. Let us just say that `unique_attachment_id` has the value as "att-abc-123".  We can store the file as `/attachments/att-abc-123/{filename_of_attachment}`. Now if two emails have an attachment named `report.pdf`, the different `internal_id`s lead to different paths, and no collision.  The `unique_attachment_id` is your filesystem key ; the filename is just metadata you display back to the user.  
 
 The unless `mime_type.start_with?('multipart')` guard catches both pure RFC 822 messages (which can't have attachments) *and* single-part MIME messages (which also can't have attachments separate from the body). Everything pre-1993 falls through cleanly, and we handle emails from after 1993 correctly.
 
@@ -157,27 +165,29 @@ end
 
 "bin/mbox_pre-parser.rb" will not utilize `sdbm` by default for this purpose.  By default, it will utilize `sqlite3`. The latter guarantees ACID (Atomicity, Consistency, Isolation, Durability) whereby writes either commit or completely fail, and concurrent operations do not interupt one another, and committed data survives a sudden crash. For our dedupe cache this means that our script won't lose the "seen" list if it gets interrupted.
 
-The detachment of email attachments at ingest stage ("bin/mbox_pre-parser.rb") which have filenames as the `unique_attachment_id` will be at the location as 
+The detachment of email attachments at ingest stage ("bin/mbox_pre-parser.rb") with an `unique_attachment_id` which have filenames as `filename_of_attachment` will be at the location as 
 ```ruby 
-"./pre-parsed/attachments/#{unique_attachment_id}"
+"./pre-parsed/attachments/#{unique_attachment_id}/#{filename_of_attachment}"
 ```
 
-## The thread_id problem.
+## The `thread_id` problem.
 **The fracture problem**: Thread A -> B -> C -> D -> E. The MUA (Mail User Agent) sending E drops A and B from References. A single-pass of a parser sees `References.first` = C, and assigns `thread_id` = C. But messages A->D all got `thread_id` = A. One conversation is now split into two. Therefore one partial-conversation might end up in "train", and the other in "val".  This would be cross-contamination for LoRA training, leading to Gestalt replies learnt by regurgitating verbatim text, and *not* proper generalisation within Machine Learning. Trying to solve this graph-connectivity problem at the ingest (pre-parser) time would be a futile attempt to reinvent Neo4j's WCC (Weakly Connected Components) whereby WCC merges the partial-conversation from A->D, and that of from C->E, back into one "component" : where a "component" is a graph-theory term meaning, in this example, a maximal set of nodes where every node can reach every other node through edges, ignoring direction. A `component_id` is an arbitrary integer label Neo4j GDS (Graph Data Science) assigns to that maximal set, whereby every message within the same conversation gets the same number.  GDS is a high-performance plugin that computes those `component_id`s so we do not have to write complex graph traversal code in Ruby.
 
-As there is no Thread-ID within the email message headers (it is not within any of the RFC standards), we elect to avoiding creating `thread_id` at ingest time ourselves : via linking the email headers as "Message-ID", "In-Reply-To", and "References". We avoid doing this because it would not be useful to have partial-conversations recorded within any Email-thread.  (Our Email-Thread is a virtual data structure as it does not appear within any of the metadata extracted from the mboxes at ingest time). Instead, after windowing our `internal_id`s into a staging area for KG building, we build KG, and then run WCC upon this built graph, outputting via `gds.wcc.stream` structures as `(nodeId, componentId)` pairs (which are written to a staging area for "bin/splitter.rb" to process) like `{"internal_id":"abc123", "thread_id":42}`.  We do this for every EmailMessage with its unique `internal_id` that is found within the KG database. Then `splitter.rb` partitions those `thread_id`s by the probability ratio of 80/10/10 into the pool/set files as "train.jsonl", "val.jsonl", and "test.jsonl" in one pass.  Thus we will need to BUILD, or RE-BUILD KG (which will be excluding DSRs and including the latest corpora of email messages), *before* we can consider TRAINING or RE-TRAINING LoRA with the `message_body`s referred to within the JSONL pool files which are output from "bin/splitter.rb".  Note also that KG is being built with a different windowed data set each time the data as shard files it relies upon is dynamically updated as new corpora of mboxes arrive, and also there is not any guarantee that the `thread-id` will be the same upon a given `internal_id` when these KG builds are separated by any time interval. Neo4j GDS does not keep any state upon these `thread_id`s which are derived from volatile snapshots of the current graph. 
+As there is no Thread-ID within the email message headers (it is not within any of the RFC standards), we elect to avoiding creating `thread_id` at ingest time ourselves : via linking the email headers as "Message-ID", "In-Reply-To", and "References". We avoid doing this because it would not be useful to have partial-conversations recorded within any Email-thread.  (Our Email-Thread is a virtual data structure as it does not appear within any of the metadata extracted from the mboxes at ingest time). Instead, after windowing our `internal_id`s into a staging area for KG building, we build KG, and then run WCC upon this built graph, outputting via `gds.wcc.stream` structures as `(nodeId, componentId)` pairs (which are written to a staging area for "bin/splitter.rb" to process) like `{"thread_id":42, "internal_ids": ["abc123", "def456", "e1f2g3", ... ] }`. We do this for every EmailMessage with its unique `internal_id` that is found within the KG database. Then `splitter.rb` partitions those `thread_id`s by the probability ratio of 80/10/10 into the pool/set files as "train.jsonl", "val.jsonl", and "test.jsonl" in one pass.  Thus we will need to BUILD, or RE-BUILD KG (which will be excluding DSRs and including the latest corpora of email messages), *before* we can consider TRAINING or RE-TRAINING LoRA with the `message_body`s referred to within the JSONL pool files which are output from "bin/splitter.rb". Note also that KG is being built with a different windowed data set each time the data as shard files it relies upon is dynamically updated as new corpora of mboxes arrive, and also there is not any guarantee that the `thread-id` will be the same upon a given `internal_id` when these KG builds are separated by any time interval. Neo4j GDS does not keep any state upon these `thread_id`s which are derived from volatile snapshots of the current graph. 
 
-A "referenced-but-absent Message-ID" might occur when the Message-ID Q is referenced from Message K in window 34, but does not arrive in the KG build process until a later window is processed, say window 36. It might also occur in the case where the message Q never arrives at all.  It may have been sent to a list we don't have, or pre-dates the corpora. 
+A "referenced-but-absent Message-ID" might occur when the Message-ID Q is referenced from Message K in window 34, but does not arrive in the KG build process until a later window is processed, say window 36. It might also occur in the case where the message Q never arrives at all. It may have been sent to a list we don't have, or pre-dates the corpora. 
 
-A phantom Message-ID is one that appears in another message's References header, or In-Reply-To header, but has no corresponding EmailMessage node yet. If it shows up in a later window, then you hydrate the phantom into a real node when the later arrives. If not, it stays as topological scaffolding, which means that the phantom node keeps the graph connected so that WCC doesn't fracture threads. If both messages A and B reference (are messages which are in reply to) a missing message C, dropping C would leave A and B isolated.  Making C as a phantom, bridges them, so that WCC correctly groups A and B together. It does this by creating a phantom node (which is as type/label as EmailMessage) for C, which has an `internal_id = nil` and the property as `message_id` with the value which is referenced by the members of the array as `references` for both A and B (from the fat shard files), which have thus caused the KG build-time to create edges with the type as `[:MESSAGE_IS_A_REPLY_TO_MESSAGE]` between the EmailMessage nodes which have the property as `message_id` of the values contained within these `references` arrays, and this phantom node. WCC see the A-C-B bridge and assigns all three the same `thread_id`. 
+A phantom Message-ID is one that appears in another message's References header, or In-Reply-To header, but has no corresponding EmailMessage node yet. If it shows up in a later window, then you hydrate the phantom into a real node when the later arrives. If not, it stays as topological scaffolding, which means that the phantom node keeps the graph connected so that WCC doesn't fracture threads. If both messages A and B reference (are messages which are in reply to) a missing message C, leaving C absent would leave A and B isolated.  Making C as a phantom, bridges them, so that WCC correctly groups A and B together. It does this by creating a phantom node (which is as type/label as EmailMessage) for C, which has an `internal_id = nil` and the property as `original_message_id` with the value which is referenced by the members of the array as `references` for both A and B (from the fat shard files) which have thus caused the KG build-time to create edges with the type as `[:MESSAGE_IS_A_REPLY_TO_MESSAGE]` between the EmailMessage nodes which have the property as `original_message_id` as the values contained within these `references` arrays, and this phantom node. WCC see the A-C-B bridge and assigns all three the same `thread_id`. 
 
-An "export query" is just the Cypher `MATCH` query you run against the graph to dump the `thread_id` with the  `internal_id`s into a row of your output JSONL file called "threads_staging_area.jsonl" to be staged for "bin/splitter.rb" to input. Typically this export query will have a `WHERE internal_id IS NOT NULL` to filter out the phantoms.  This JSONL output file should be as:
+An "export query" is just the Cypher `MATCH` query you run against the graph to dump the `thread_id` with the  `internal_id`s into a row of your output JSONL file called "threads_staging_area.jsonl" to be staged for "bin/splitter.rb" to input. Typically this export query will have a `WHERE internal_id IS NOT NULL` to filter out the phantoms. This JSONL output file should be as:
 ```jsonl
 {
   "thread_id": "b7n9s0",
   "internal_ids": ["abc123", "def456", "a1b2c3"] 
 }
 ```
+
+In reality the file as "threads_staging_area.jsonl" will be stored to and accessed from an SQlite database. We can store it as a junction table in SQlite : `CREATE TABLE threads(thread_id TEXT, internal_id TEXT, position INTEGER, PRIMARY KEY(thread_id, position))` with an index upon both columns. We will have one row per (thread_id, internal_id) pair. Then "bin/splitter.rb" processes one thread at a time via `SELECT internal_id FROM threads WHERE thread_id = ? ORDER BY position`. This is fully streaming, and is O(1) per thread, with no JSONL loading. We import the JSONL with a single-pass `INSERT` loop. The file which does this inserting will be called "bin/populate_threads_to_database.rb".
 
 Neo4j builds nodes and edges strictly from the raw arrays (E references C and D only). This is phase 1, during which phantom nodes may be created. Weakly Connected Components (WCC) traverses all connected nodes ignoring edge direction: A links to B, B links to C, C links to D, C links to E, and D links to E. Because a path exists from A to E, WCC merges them into one component and assigns a ground-truth thread ID.  Neo4j WCC gives you the `thread_id`. Note that WCC happens *after* phase 2.
 
@@ -192,11 +202,11 @@ A->B->C
       C --> E
 ```
 
-If, when building KG during phase 1, a value within the array as `references_as_message_ids` (from the fat ingested shard files which are referenced during the KG build process) contains a member as a string which is not of the same value of an `original_message_id` (from the fat ingested shard files) which is currently known as the value of the property as `message_id` upon a node with the Label type as EmailMessage, then a phantom node with the Label as EmailMessage is created with the property as `internal_id` equal to nil, for the edge with the type as `[:MESSAGE_IS_A_REPLY_TO_MESSAGE]`. If this value of this `original_message_id` is subsequently read into the KG build process, creating a node with the label as EmailMessage with the property as `message_id` with this value, then the erstwhile phantom node which corresponded to this missing EmailMessage node with the property as `message_id` with the value of this `original_message_id` is hydrated into a proper node immediately, during phase 1. Otherwise the phantom node remains as a phantom node indefinitely if the target is never inputted into the KG build process, allowing WCC to utilize this phantom target within the context of associating those EmailMessage nodes which reference this phantom with all with a single and unique `thread_id` which is dynamically created upon each run of the KG build-time. 
+If, when building KG during phase 1, a value within the array as `references_as_message_ids` (from the fat ingested shard files which are referenced during the KG build process) contains a member as a string which is *not* of the same value of an `original_message_id` (from the fat ingested shard files) which is currently known as the value of the property as `original_message_id` upon a node with the Label type as EmailMessage, then a phantom node with the Label as EmailMessage is created with the property as `internal_id` equal to nil, for the edge with the type as `[:MESSAGE_IS_A_REPLY_TO_MESSAGE]`. If this value of this `original_message_id` is subsequently read into the KG build process, creating a node with the label as EmailMessage with the property as `original_message_id` with this value, then the erstwhile phantom node which corresponded to this missing EmailMessage node with the property as `original_message_id` with this value is hydrated into a proper node immediately, during phase 1. Otherwise the phantom node remains as a phantom node indefinitely if the target is never inputted into the KG build process, allowing WCC to utilize this phantom target within the context of associating those EmailMessage nodes which reference this phantom with all with a single and unique `thread_id` which is dynamically created upon each run of the KG build-time. 
 
 Neo4j doesn't receive a list of edge triples directly. Instead, we build the graph using Cypher, which creates the node and edges (relationships) on the fly. Cypher statements describe what you want the graph to look like, and Neo4j constructs it accordingly.  Every element must be defined by a `CREATE` statement, or by a `MERGE` statement.  A `MERGE` statement is idempotent (won't recreate nodes or relationships that currently exist within the graph) but it requires that we must have in use at least one property so that all the properties together can act as a pattern as a primary key. See [GRAPH SCHEMA](#how-does-kg-retrieval-interpret-what-the-user-provided-prompt-means) for the following Node definition: 
 ```
-EmailMessage(message_id: STRING, internal_id: STRING, subject: STRING, timestamp_received: datetime, thread_id: STRING, has_attachment: BOOLEAN)
+EmailMessage(original_message_id: STRING, internal_id: STRING, subject: STRING, timestamp_received: datetime, thread_id: STRING, has_attachment: BOOLEAN)
 ``` 
 
 ### Why KG *needs* the windowed `internal_id` as its input.
@@ -349,7 +359,7 @@ Note that "bin/commit_mbox.rb" specifies a directory-name within its path as `un
 A planned rollover involves the flipping of a symlink.  This symlink may point to the actual model checkpoint (LoRA adapter) directory, which may reside, for example, at `current/releases/2025-01-15-clean`, so that flipping the symlink would atomically switch from serving the old adapter to the newly trained DSR-clean one, without changing any runtime configurations.
 
 ## What is a materialization?
-Materialization is the process of writing each of the results from the split on `thread_id` (from KG WCC output written to a staging area called "threads_for_splitter.jsonl" at the location as "./pre-parsed/) to all of the files as "train.jsonl", "val.jsonl", and "test.jsonl". This is done by the command as "bin/splitter.rb", which reads the output from KG, and writes these three pool files in **one pass**.  As tombstones and spotcheck-failed `original_message_id`s and `from` fields have already been excluded by "bin/window_maker.rb", this command as `splitter.rb` will not see any of these from the output staging area from KG and so these will be missing from pool/set files, because KG won't see any of the DSR-ed or manually-spotchecked-excluded `original_message_id`s which have been listed as tombstoned within the file as "manually_excluded_tombstones.jsonl", and neither will it see those which have been blacklisted within the file as "spotcheck_manual_exclusions.jsonl".  Recall that the split occurs upon each `thread_id` once and once only, so that each `original_message_id` which is associated with that `thread_id` gets written to the same pool file. Recall also that the output from Neo4j GDS WCC is a dynamic target as the `thread_id`s may be different in each run.
+Materialization is the process of writing each of the results from the split on `thread_id` (from KG WCC output written to a staging area called "threads_for_splitter.jsonl" at the location as "./pre-parsed/) to all of the files as "train.jsonl", "val.jsonl", and "test.jsonl". This is done by the command as "bin/splitter.rb", which reads the output from KG, and writes these three pool files in **one pass**. As tombstones and spotcheck-failed `original_message_id`s and `from` fields have already been excluded by "bin/window_maker.rb", this command as `splitter.rb` will not see any of these from the output staging area from KG and so these will be missing from pool/set files, because KG won't see any of the DSR-ed or manually-spotchecked-excluded `original_message_id`s which have been listed as tombstoned within the file as "manually_excluded_tombstones.jsonl", and neither will it see those which have been blacklisted within the file as "spotcheck_manual_exclusions.jsonl".  Recall that the split occurs upon each `thread_id` once and once only, so that each `original_message_id` which is associated with that `thread_id` gets written to the same pool file. Recall also that the output from Neo4j GDS WCC is a dynamic target as the `thread_id`s may be different in each run.
 
 ## What is the purpose of materialization?
 Is there any point of materialization of this data to a "train.jsonl" file, a "val.jsonl" file, and a "test.jsonl" file.  Can't I just read from the "threads" staging output area as the file as "threads_staging_data.jsonl" from KG WCC and feed this data to pre-LoRA, and hence LoRA, training?  Answer: filtering per-epoch is wasteful, because you would be loading 100% of rows and then subsequently filtering to 80% of the total upon every epoch.  You would additionally require an immutable manifest file output from the "threads" staging output area to ensure that a record of what thread got split to which set was recorded.  This immutable manifest file is unnecessary, and this is avoidable I/O (input/output) to do this upon every epoch. Accepting this point, we must also observe that the materialized files are super-skinny : they contain the (non-windowed) metadata as `internal_id:, thread_id:, ingest_path:, shard_file:, line:` which is expanded from the staged output ("threads_staging_data.jsonl") from KG GDS WCC (Graph Data Science running Weakly Connected Components) : which obviously also must contain the fields as `internal_id` and `thread_id` pertaining to this data. The other fields as `ingest_path`, `shard_file`, and `line` are expanded upon and written into the rows of the pool/set files by lookup in the files as "skinny_shard_index.jsonl". The field as `ingest_path` refers to which particular shard file this `internal_id` came from. The file as "skinny_shard_index.jsonl" contains entries which look like:
@@ -363,9 +373,9 @@ Is there any point of materialization of this data to a "train.jsonl" file, a "v
 ```
 
 ## Tell me about "bin/window_maker.rb".
-At the time of **KG creation**, the KG builder reads the file as "windows_for_KG.jsonl" (which has rows which contain only `window_idx`, `window_range`, and `internal_ids`), and uses the index file as "skinny_shard_index.jsonl" in order to locate quickly, the metadata required to derive the topology of our KG creation.  As we already have the metadata for KG stored within our shard files (which were output from "bin/mbox_pre-parser.rb") we can construct a KG via using it. 
+At the time of **KG creation**, the KG builder reads the file as "windows_for_KG.jsonl" (which has rows which contain only `window_idx`, `window_range`, and `internal_ids`), and uses the index file as "skinny_shard_index.jsonl" in order to locate quickly, the metadata required to derive the topology for our KG creation. As we already have the metadata for KG stored within our shard files (which were output from "bin/mbox_pre-parser.rb") we can construct a KG via using it. 
 
-KG (Knowledge-Graphs) creation requires us to have *windowed* metadata from the ingested shard file (which are output from "bin/window_maker.rb"). We may want to have the latest data from not more than 7 days ago, included within KG creation. We stage this windowed metadata onto disk.  This windowed spine staged to be input to KG consists of rows of JSONL containing the fields as `window_idx`, `window_range`, and `internal_ids`.  This KG spine is output by "bin/window_maker.rb", and is the file which is called "windows_for_KG.jsonl", stored at the location as "./pre-parsed/".  The cost of creating this file as "windows_for_KG.jsonl" is negligible, and means that, (1) the expensive cost of KG construction can occur when we tear down the existing KG, without having to reparse ingested shard files ; and (2) if KG constuction fails part-way through, you can resume from the last completed window, and (3) this will allow us to experiment with different window sizes without touching the raw shards. Our file as "windows_for_KG.jsonl" is a build-time manifest. The file as "windows_for_KG.jsonl" ought to be read-only, non-appendable, because we build once via `window_maker.rb` every time we wish to alter this rebuild-on-demand artifact. This file as "windows_for_KG.jsonl" ought to have atomic overwrite.  We are to use `File.rename` for the write to avoid corrupting the file if the process dies mid-write, just like we do with our manifest files. 
+KG (Knowledge-Graphs) creation requires us to have *windowed* metadata from the ingested shard file (which are output from "bin/window_maker.rb"). We may want to have the latest data from not more than 7 days ago, included within KG creation. We stage this windowed metadata onto disk. This windowed spine, staged to be input to KG, consists of rows of JSONL containing the fields as `window_idx`, `window_range`, and `internal_ids`. This KG spine is output by "bin/window_maker.rb", and is the file which is called "windows_for_KG.jsonl", stored at the location as "./pre-parsed/".  The cost of creating this file as "windows_for_KG.jsonl" is negligible, and means that, (1) the expensive cost of KG construction can occur when we tear down the existing KG, without having to reparse ingested shard files ; and (2) if KG constuction fails part-way through, you can resume from the last completed window, and (3) this will allow us to experiment with different window sizes without touching the raw shards. Our file as "windows_for_KG.jsonl" is a build-time manifest. The file as "windows_for_KG.jsonl" ought to be read-only, non-appendable, because we build once via `window_maker.rb` every time we wish to alter this rebuild-on-demand artifact. This file as "windows_for_KG.jsonl" ought to have atomic overwrite.  We are to use `File.rename` for the write to avoid corrupting the file if the process dies mid-write, just like we do with our manifest files. 
 
 As an example of when `window_size=30`:
 ```jsonl
@@ -380,7 +390,7 @@ As an example of when `window_size=30`:
 ```
 Note that in reality our `internal_id`s will be not nicely sequentially numbered.  They will in fact be SHA256 hashes.
 
-"bin/window_maker.rb" will read the **ingested** shard files, as mentioned within the file as "manifest_of_ingested_mboxes.jsonl", and after filtering out the DSR tombstones and manually excluded spotchecks (i.e. all `internal_id IN manually_excluded_tombstones.jsonl` OR `sender_address IN manually_excluded_tombstones.jsonl` OR `internal_id IN spotcheck_manual_exclusions.jsonl` OR `sender_address IN spotcheck_manual_exclusions.jsonl`) in order to establish the windowing required for Knowledge-Graph creation, by which the associated metadata for KG (including the metadata for attachments) will be read from the shard files.  This means that we can make the staged files output from "bin/window_maker.rb" super-skinny, whereby they only contain the metadata necessary for windowing, and nothing more.  This is in obedience to the DRY (don't repeat yourself) principle of data in general.  KG does *not* contain the email-bodies.  The `message_body`s are used by BM25, and the Vector DB (a semantic search), as well as to be used during a retrain done to LoRA. 
+"bin/window_maker.rb" will read the **ingested** shard files, as mentioned within the file as "manifest_of_ingested_mboxes.jsonl", and we window *after* filtering out the DSR tombstones and manually excluded spotchecks (i.e. all `internal_id IN manually_excluded_tombstones.jsonl` OR `sender_address IN manually_excluded_tombstones.jsonl` OR `internal_id IN spotcheck_manual_exclusions.jsonl` OR `sender_address IN spotcheck_manual_exclusions.jsonl`) in order to establish the windowing required for Knowledge-Graph creation, by which the associated metadata for KG (including the metadata for attachments) will be read from the shard files.  This means that we can make the staged files output from "bin/window_maker.rb" super-skinny, whereby they only contain the metadata necessary for windowing, and nothing more. This is in obedience to the DRY (don't repeat yourself) principle of data in general.  KG does *not* contain the email-bodies. The `message_body`s are used by BM25, and the Vector DB (a semantic search), as well as to be used during a retrain done to LoRA. 
 
 The schema for our file as "windows_for_KG.jsonl" is as:
 ```jsonl
@@ -415,20 +425,17 @@ The schema for our file as "windows_for_KG.jsonl" is as:
   }
 }
 ```
-Note that this schema is skinny by design. There is not any content, and no topology. The KG builder obtains its metadata by referencing the location which is referred to by the file as "skinny_shard_index.jsonl".
+Note that this schema is skinny by design. There is not any `message_body` content, and no topology. The KG builder obtains its metadata by referencing the location which is referred to by the file as "skinny_shard_index.jsonl".
 
 Our pre-LoRA training is just iterating `message_body`s, and yet we still *do* need a field as `thread_id` within the file as "train.jsonl", because we *do* need thread awareness at training time in order to run an SLM upon the messages within each thread so that a high-quality dataset in the Alpaca format can be constructed via this SLM weak supervision. The same applies to the files as "val.jsonl", and "test.jsonl"
 
 The output files from "bin/splitter.rb" (such as "train.jsonl") contain such JSONL rows as:
 ```jsonl
 {
-  "internal_id": "abc123",
-  "thread_id": "def987",
-  "ingest_path": "./until_2026-03-24T18:47:00Z_000001/",
-  "shard_file": "part-000003.jsonl", 
-  "line": 537
+  "thread_id": "b7n9s0",
+  "internal_ids": ["abc123", "def456", "a1b2c3"] 
 }
-```  
+```
 
 ## How does materialization handle DSR omissions done to data?
 The scenario is the following. A "DSR deletion" request for "joe@bloggs.com" comes in. This results in a record of this email-address (`from` field) being written into the file as **"manually_excluded_tombstones.jsonl"**. This case will result in a record of this specific email address's field as `from` (from within the fat shard files) being actually written into the file as "manually_excluded_tombstones.jsonl". Then, 6 months after this DSR is processed, an email from "joe@bloggs.com" arrives within a corpus of emails. Although it will get ingested and written into the shard files output from "bin/mbox_pre-parser.rb", it *will* get filtered (by the `from` field) by `window_maker.rb`, and thus *won't* be included within the data which enters Vector, BM25,`window_maker.rb` and subsequently KG and LoRA training. 
@@ -654,6 +661,8 @@ TO DO. implement a "bin/spotcheck.rb" file as a wrapper to "bin/spotcheck_exclud
 
 TO DO. create "bin/spotcheck_include_sender" and "bin/spotcheck_include_message".
 
+TO DO. Implement a log viewer "bin/log_view" command such that `bin/log_view --binary-attachments` will list an abbreviation of all the `internal_id`s which have contained a binary attachment, while `bin/log_view --binary-attachments -v` will list these `internal_id`s in full.  The `--output-to-file <filename>` will write the results to the filename specified.  This "bin/log_view" will be able to look up any of the metadata associated with the `internal_id` as a key, via looking up the corresponding data via the file as "skinny_shard_index.jsonl", e.g. `bin/log_view --binary-attachments --from` will pass those `internal_id`s which have binary attachments to "skinny_shard_index.jsonl" which will lookup `from` field corresponding to those `internal_id`s in the fat shard files.  It will be possible to construct a `--filter` in the following way; `bin/log_view --binary-attachments --timestamp_received --filter --from "wendy@frogs.com" --to "peter@rabbit.org"`  which  will list the `timestamp_received` when a binary attachment was sent from Wendy to Peter. The option as `--all` will list all the medata excluding the `message_body`.  This option as `--all` will need to come before the option as `--filter` as options after `--filter` will be considered as those pertaining to the filter, and filtering upon all would exclude everything. To view the message body we simply use the option as `--message_body` prior than any `--filter` option.  Although we are creating functionality here which is also avaiable in RAG KG, we are doing so for the purposes of forensic auditting, not a user experience or interface.  For the `--filter` option we will also need to have options as `--timestamp_received_is_less_than` and `--timestamp_received_is_greater_than`.  `bin/log_view help` should provide all the necessary user instructions in a pretty, colourful way. `spotcheck view` shall be as a wrapper for "bin/log_view".
+
 ## Is there any way to automate the spot checking of email bodies?
 Please note that this is *not* a form of [labelling](#what-would-label-drift-prior-to-training-be). 
 
@@ -661,9 +670,9 @@ We *could* classify low-signal messages like "thanks!" or auto-replies, flag out
 
 To explain more about how to flag outliers by perplexity when automating, via an SLM, the spot-checking of email bodies, run each email body through your base SLM and measure token-level perplexity (average negative log of the likelihood). Emails which the model finds "surprising", with an unusually high perplexity, are likely weird : garbled encoding, foreign language mixed in, copy-pasted legal boilerplate, spam that slipped through, or novel jargon-heavy content.  Unusually low perplexity flags the opposite problem : boilerplate, auto-replies, "thanks" emails (your low signal category). We *could* set threshold on both tails of the distribution and route flagged messages for human review.  
 
-In our case we are going to deal with messages with too low perplexity in pre-LoRA training by creating a high-quality Alpaca dataset via an SLM with SLM extraction logic operating upon and within each `thread_id`: which are read from the pool/set files as "train.jsonl", "val.jsonl", and "test.jsonl" see towards the end of [the crux of the matter](#what-is-the-crux-of-the-matter).  Our SLM extraction logic involves PII placeholder replacements, boilerplate placeholders, This will account for the low end of the scale, of which messages will be too numerous to be manually decided upon. For the other end, to find bizarre symbols or other garbage which will confuse LoRA, I think that this LLM automated triage is a good idea prior to spotchecking in order to triage what should be spot-checked.
+In our case we are going to deal with messages with too low perplexity in pre-LoRA training by creating a high-quality Alpaca dataset via an SLM with the SLM extraction logic operating upon, and within, each `thread_id`: which are read from the pool/set files as "train.jsonl", "val.jsonl", and "test.jsonl" (see towards the end of [the crux of the matter](#what-is-the-crux-of-the-matter)).  Our SLM extraction logic involves PII placeholder replacements, and boilerplate placeholders. This will account for the low end of the scale, of which messages will be too numerous to be manually decided upon. For the other end, to find bizarre symbols or other garbage which will confuse LoRA, I think that this LLM automated triage is a good idea prior to spotchecking in order to triage what should be spot-checked.
 
-TO DO. Think of how to hit Ollama container and when this has been thought of, implement a "bin/perplexity_catcher.rb" to output a triage file at a stage called SPOTCHECKING which is run before ingest ("bin/mbox_pre-parser.rb"), 
+TO DO. Think of how to hit Ollama container, and when this has been thought of, implement a "bin/perplexity_catcher.rb" to output a triage file at a stage called SPOTCHECKING which is run before ingest ("bin/mbox_pre-parser.rb"), 
 
 ## Tell me about DSRs (Data Subject Requests)
 We may have a possible legal obligation to remove data from the data sets for KG, and to *not* serve deleted users' data from the Vector DB, and *not* to serve this data by BM25, and *not* include this data within LoRA training, such that we will *not* retrain the model upon a user's "request to be forgotten", and *not* reference this individual within any RAG (retrieval augmentation system) which may subsequently use this model at inference time.  As our Vector DB will *not* be using the output set files from "bin/window_maker.rb", when chunking before recreating the embedded indexes within its vector database, it (chunking for Vector) must apply the same exclusion list filter logic that "bin/window_maker.rb" uses also, and so does BM25 building when filtering the rows from the ingested fat shard files to create the BM25 index. 
@@ -871,7 +880,7 @@ Key points:
 
 ## How do I choose/select the text from the `message_body` to pass to the BGE encoder?
 You do not select chunks/texts manually. We split the job in two by doing the following:
-- 1. **The Sieve**: Your SLM scans the `message_id` and extracts the *high-signal* content (which can either be content of code, or natural language content).
+- 1. **The Sieve**: Your SLM scans the `original_message_id`s and extracts the *high-signal* content (which can either be content of code, or natural language content).
 - 2. **The Butcher**: A fast, **deterministic** Ruby regex splits those extracted chunks which have been sieved out by 1. 
 
 ## How would the VDB deal with `> > >` quotes within the `message_body`?
@@ -1899,7 +1908,7 @@ The file as "train.jsonl" contains approximately 80% of the `thread-id`s than th
 
 In order to assign splits based upon the `thread_id` (which neo4j KG GDS WCC has created for us), "bin/splitter.rb" reads the output from the "threads" staging area from KG which contained data about these threads : this file is called "threads_staging_data.jsonl". This is the input to "bin/splitter.rb", which "bin/splitter.rb" needs to read in order to allocate each `thread_id` to one and one only split: either train, val, or test.
 
-In short, "train.jsonl" is a subset of the data from "threads_staging_data.jsonl", and so is "val.jsonl", and "test.jsonl". They are disjoint sets : which means that they contain no common elements. Their insection is the empty set. The set of data contained by "threads_staging_data.jsonl" is their union : and this union does *not* contain any excluded rows corresponding to DSRs and spotcheck exclusiongs.  
+In short, "train.jsonl" is a subset of the data from "threads_staging_data.jsonl", and so is "val.jsonl", and "test.jsonl". They are disjoint sets : which means that they contain no common elements. Their insection is the empty set. The set of data contained by "threads_staging_data.jsonl" is their union : and this union does *not* contain any excluded rows corresponding to DSRs and spotcheck exclusions.  
 
 It *is* necessary to keep the field as `thread_id` within "train.jsonl", "val.jsonl", and "test.jsonl" because this will be used within pre-LoRA training to create a high quality dataset set to train the LoRA activation layer, which sits atop the LLM.
 
@@ -1977,8 +1986,9 @@ MERGE (f:EmailAddress {email_address: "bob@frogs.net"})
 ```
 But the following creates an edge:
 ```cypher
-MERGE (a:EmailAddress {email_address: "alice@bats.net"})-[:ADDRESS_DID_SEND_MESSAGE]->(c:EmailMessage {message_id: "h3jj56"})
+MERGE (a:EmailAddress {email_address: "alice@bats.net"})-[:ADDRESS_DID_SEND_MESSAGE]->(c:EmailMessage {original_message_id: "h3jj56", internal_id: #sl9w28", ...})
 ```
+
 Neo4j doesn't receive a list of edge triples directly. Instead, we build the graph using Cypher, which creates the node and edges (relationships) on the fly. Cypher statements describe what you want the graph to look like, and Neo4j constructs it accordingly.  Every element must be defined by a `CREATE` statement, or by a `MERGE` statement.  A `MERGE` statement is idempotent (won't recreate nodes or relationships that currently exist within the graph) but it requires that we must have in use at least one property so that all the properties together can act as a pattern as a primary key.  Within `MERGE (e:EmailMessage {internal_id: "abc123...", original_message_id: "efg456..."})` it was previously guaranteed, during the mbox ingestion stage, by "bin/mbox_pre-parser.rb", that `internal_id = sha256(original_message_id + message_body)`, and then we deduplicated, at ingest, exact email duplications (where both the `original_message_id` and the `message_body` are identical and thus `internal_id` got duplicated). So, we *know* that within the ingested shard files, any row will *not* contain an exact duplication of the email message.  This means that if a collision has occurred upon the `original_message_id`, that the `message_body` will be different, otherwise this would have been an exact duplication of the same email landing twice, and thus prevented from appearing. So we could use `MERGE (e:EmailMessage {internal_id: "abc123...", original_message_id: "efg456..."})`, which *is* idempotent, and which won't fail with an error message if the node already exists, but it wouldn't be able to do anything other than succeed *with* a side-effect anyway, because MERGE matches upon labels (`:EmailMessage`) *and* properties (`{internal_id: "abc123...", original_message_id: "efg456..."}`). With MERGE you *must* specify at least one property that will be the unique primary key for this node, and if I have two or more properties, then MERGE matches the whole pattern, so all those properties together act as the key. But more importantly although we *could* use `MERGE` we *can* instead use `CREATE (e:EmailMessage {internal_id: "abc123...", original_message_id: "efg456..."})` because, although `CREATE` does not look at properties, or their values at all, *and* `CREATE` *would* create two separate nodes with the same properties *if* those properties were identical, we already know that they cannot be identical because `internal_id` is guaranteed to be unique by "bin/mbox_pre-parser.rb", and therefore duplications of all of the same identical properties *cannot* happen, for example, where we might be doing a `CREATE (q)-[:MESSAGE_IS_A_REPLY_TO_MESSAGE]-(p)` : where one of the reference Message-IDs within (p) accidentally appeared twice due to a broken MUA. If the `mesaage_body`s were identical then this would be a duplicate, and deuplicated. If the `message_body`s were *not* identical then therefore the `internal_id`'s would be different, and thus `CREATE` is safe to use in both cases. `CREATE` is blind to idempotency, but faster.  This improvement of speed may be useful in reducing the amount of time in which it takes to build, or re-build a KG.  When doing a `MERGE (e:EmailAddress {email_address: "alice@bats.net"})`, however, the idempotency is useful if we are in doubt about the uniquenesss of what data properties we are entering.  But as we are not in doubt when creating nodes with the label as `EmailMessage`, it is not essential to use `MERGE` as the node *cannot* be created twice.  We can search for nodes by using any of those properties and this is what a index is for.
 
 An index is a separate data structure (like a B-tree or hash map) that Neo4j maintains alongside your graph to speed up lookups. Without it, a `WHERE e.internal_id = "abc123"` scans every `:EmailMessage` node one by one. With it, Neo4j jumps straight to the match. Indexes aren't created by `CREATE` or `MERGE` at all. They're standalone commands:
@@ -1990,7 +2000,7 @@ This is a schema-level operation, not a data operation. You run it once upfront,
 Cypher is the language which is used in order to call Graph Data Science procedures : which are algorithms for centrality or community detection.  Neo4j's GDS (Graph Data Science) library provides algorithms for analyzing graph structure. Centrality algorithms, like PageRank or degree centrality, identify influential nodes. Community detection algorithms, such as Louvain modularity, find groups of densely connected nodes. These functions are implemented using Cypher, allowing you to query and analyze graph data effectively.
 
 We do the following.
-- 1. We design the schema for our particular ontology : the entity types, and the relations. Our email addresses are nodes (`:EmailAddress`).  Our message-ids like `original_message_id`, `in_reply_to_message_id` and each of the `references` taken as an individual `message_id`s are nodes (`:EmailMessage`). Each of our `attachments` taken one by one are nodes (`:Attachment`).
+- 1. We design the schema for our particular ontology : the entity types, and the relations. Our email addresses are nodes (`:EmailAddress`).  Our message-ids like `original_message_id`, `in_reply_to_message_id` and each of the `references` taken as an individual `original_message_id`s are nodes (`:EmailMessage`). Each of our `attachments` taken one by one are nodes (`:Attachment`).
 - 2. We define edge types: `ADDRESS_DID_SEND_MESSAGE`, `MESSAGE_IS_A_REPLY_TO_MESSAGE`, `MESSAGE_WAS_RECEIVED_BY_ADDRESS`, `ATTACHMENT_BELONGS_TO_MESSAGE`
 - 3. We think about how our nodes relate to each other.  
 
@@ -2119,7 +2129,7 @@ Note that string comparison on timestamps within Neo4j should be done via utiliz
 require 'time'
 datetime = Time.iso8601(timestamp_received_string)
 session.run(
-  'MERGE (q:EmailMessage {message_id: "a4b5c6...", internal_id: "e1f2g3...", timestamp_received: datetime, thread_id: "abcdefgh123...", has_attachment: false})'
+  'MERGE (q:EmailMessage {original_message_id: "a4b5c6...", internal_id: "e1f2g3...", timestamp_received: datetime, thread_id: "abcdefgh123...", has_attachment: false})'
 )
 ```
 Note also that we do not include the metadata as "alleged_timestamp_sent" as a property within our `EmailMessage(original_message_id: STRING, internal_id: STRING, timestamp_received: datetime, has_attachment: BOOLEAN)` schema because it can be easily spoofed by a MUA (Mail User Agent), and is hardly likely to be valuable data within a search query, or searched for very often, as the user should be likely searching for the time when the email was received : i.e. when it passed through the last MTA (Mail Transfer Agent). 
@@ -2293,7 +2303,7 @@ Node2Vec are methods for learning embeddings of nodes in a network : by the word
 GraphSAGE is a bit different because it is an inductive framework.  Instead of learning fixed embeddings for every single node like Node2Vec does, it learns an **aggregate function** that can be applied to any node. It samples a fixed-size neighbourhood for each node, and then uses a neural network to aggregate the features from those neighbours, using things like mean, pooling, or even lstm (long short-term memory) layers, to generate the embedding. This means it can generalize to entirely new nodes or even new graphs that weren't part of the original training, making it useful for dynamic networks. Instead of node-specific vectors, when a new vector arrives we run the learnt aggregator upon its neighbours, to get a vector without rebuilding KG all over again. Long short-term memory is a type of recurrent neural network layer designed to handle sequences. Unlike standard networks, it has a "memory cell" that can store information over long periods, using gates to decide what to remember, what to forget, an what to pass on to the next step. It is basically what makes models good at understanding things like language or time-series data where the order and the context of what came before really matters.  By "models" we mean ML (machine learning) models : things like neural networks, decision trees, or even simple statistical models.  Since we are discussing graphs and lstm's, we mean the specific mathematical architectures used to learn patterns from data. We will not be using GraphSAGE within our data curation pipeline.
 
 # Tell me about BM25.
-BM25 is especially useful for exact words appearing within emails' `message-body`s, and `subject` fields, and exact email-addresses appearing within `to`, `from`, and `cc`, where dense models would sometimes hallucinate nearest-neighbour matches.
+BM25 is especially useful for exact words appearing within emails' `message-body`s, and `subject` fields, where dense models would sometimes hallucinate nearest-neighbour matches.
 
 BM25 is the evolved form of TF-IDF (Term Frequency -- Inverse Document Frequency).  IDF measures how rare a term is across the whole corpora of `message_body`s :
 ```
@@ -2319,7 +2329,7 @@ Key insight vs TF-IDF: the saturation function means going from 1 to 5 occurrenc
 
 For our KG+DPR+BM25 pipeline, when BM25 is operating upon the email message's `subject` and `message_body`, because a `subject` match is typically worth more than a match from within the `message_body`, it will behove us to index the `subject` with a higher weight in the scoring. 
 
-We feed the following fields with values as strings, into BM25 when building it : `subject`, `from`, `to`, `cc`, `message_body`.  The idea is that if someone searches for "I heard that Wendy didn't go to school today at all, which was reported to me by Mr Thomas" then that may be of `message_body`, but if they search `absence from school` then that may be an exact match of `subject`, and if they search "john@mynet.com" then that might be of the fields as `from`, `to`, or `cc`. 
+We feed the following fields with values as strings, into BM25 when building it : `subject`, `message_body`, and `internal_id`.  The idea is that if someone searches for "I heard that Wendy didn't go to school today at all, which was reported to me by Mr Thomas", then that may be of `message_body`, but if they search `absence from school` then that may be an exact match of `subject`.
 
 ## Can BM25 handle queries like "List me email contents which are about school absenteeism but within the same thread"? Can it filter upon thread_id?
 BM25 can't do either well. "About school absenteeism" is semantic : and BM25 only matches if those literal words appear in the `subject` or the `message_body`. When we ask it to examine the same thread, this is structural. BM25 has no concept of structural relationships. DPR handles meaning. KG handles structural relationships like results which are within the same `thread_id`. Within such a user query as this I would advise that RAG returns a VDB hit of all the `internal_id`s that match the semantic meaning as "school absenteeism" at the same time that BM25 searches "school absenteeism", sending the results to RRF, and top-K ; but then I want KG to be issued the Cypher to search for how many `thread_id`s there are pertaining to these `internal_id`s, and then return groupings of all related `internal_id`s pertaining to each `thread_id` to the user. This can be achieved by two phases.  
@@ -2359,7 +2369,7 @@ Yes. Absolutely. This happens during the **digest** phase upon the rows from the
 **Indexing Subject**: Where "k1" is a non-negative float which adjusts the **saturation** of term frequency (TF) weighting (a higher `k1` means TF matters more, but the consequences of increasing it too much will become negligible after a certain magnitude), and "b" (between 0 and 1), controls how **document length** affects scoring (`b=0` ignores length, `b1` penalizes longer docs more aggressively), since we are going to run lexical only with no semantic vector embeddings (with defaults as `k1=1.2` and `b=0.75`), this implies a standard, simple implementation, without have having any fancy schema fields. We have one text blob per document, and we are measuring pure keyword overlap scoring, counting tokens and penalizing length, with no knowledge of synonyms, context, or meaning : the words as "dog" and "canine" score dentically to unrelated tokens. 
 
 ## Do I need to chunk my emails' `message_body`s prior to the building phase of BM25?
-Yes ; and the chunks must align with our VDB chunks. That is to say : the VDB chunks may be bigger (contain unomitted uncensored content) but they must align upon the same boundaries because if BM25 were to index whole `message_body`s while VDB indexes chunks made up from these `message_body`s then RRF would be fusing whole-document rankings against chunk-level rankings, and this would distort the ordinal fusion of RRF. Note also that as we are performing aggregation upon the output from the bi-encoder of VDB prior to RRF where for any given `internal_id` only the result with the maximum `score` is passed to RRF, we must also do the same (called max-pool per `internal_id`) upon the output that a query performed to BM25 returns to RRF. 
+Yes ; and the chunks must align with our VDB chunks. That is to say : the BM25 chunks may be bigger (contain unomitted uncensored content) but they must align upon the same boundaries, because if BM25 were to index whole `message_body`s while VDB indexes chunks made up from these `message_body`s, then RRF would be fusing whole-document rankings against chunk-level rankings, and this would distort the ordinal fusion of RRF. Note also that as we are performing aggregation upon the output from the bi-encoder of VDB prior to RRF where for any given `internal_id` only the result with the maximum `score` is passed to RRF, we must also do the same (called max-pool per `internal_id`) upon the output that a query performed to BM25 returns to RRF. 
 
 Within the class as Sieve as we have previously defined it, it omits things like emotional expressions, pleasantries, meta-discussions, off-topic tangent, personal anecdotes, etc.  What if I want to search BM25 upon one of these personal anecdotes?  Well, that is a real gap. To solve this problem we will rewrite Sieve to output an Array containing `[message_vdb, message_bm25]` which will be passed to Butcher, and then Butcher will produce output as `[chunks_vdb, chunks_bm25]` where `chunks_vdb` will have all the anecdotes omitted, but `chunks_bm25` will be uncensored. The BM25 can handle this extra size because its chunks are not hard-bound by the limit of an embedding model like those of `chunks_vdb` are. Obviously the `message_vdb` will *not* be uncensored, but the `message_bm25` will be uncensored. 
 
@@ -2734,7 +2744,7 @@ The system prompt's refusal directive triggers.
 If chunk_idx=2 of a message scores highest, the system still fetches ALL siblings (0, 1, 3) via the sibling expansion step. The cross-encoder score determines *whether* the message appears in the final set; the `chunk_idx` determines *how* the message's content is ordered within its `<message>` block.
 
 ## Discussion of the above.
-We are merging the two chunks of Alice's proposal into the same `<message>` block, even though these are two separate chunks produced by Butcher, and we do this because these chunks have the same sender, the same timestamp, and the same `message_id`. If we were to have one `<message_id>`-per-chunk then this would mislead the LLM by repeating its id/ts/from N times, making the LLM count N "sources" when it is really one email-message.
+We are merging the two chunks of Alice's proposal into the same `<message>` block, even though these are two separate chunks produced by Butcher, and we do this because these chunks have the same sender, the same timestamp, and the same `id` : as its `original_message_id`. If we were to have one `<message id>`-per-chunk then this would mislead the LLM by repeating its id/ts/from N times, making the LLM count N "sources" when it is really one email-message.
 
 I will refer to the whole Input Window (system prompt + evidence containing chunks + query) as an "Input Window", because to refer to this as *the* "Context", I say, is as inappropriate as to refer to the whole internet as a "remote data centre", or the whole Universe as the "quantum-dynamical machine" as we may equally refer to the evidence containing the chunks as the Context within the Input Window.
 
@@ -2764,9 +2774,9 @@ CREATE (q:EmailMessage {original_message_id: "hjj56wqr...", internal_id: "kwhkjw
 ```
 we want the pattern formed by the conglomeration of `original_message_id` and `internal_id` to be unique so as to avoid false positives being entered into the KG graph, which would result in duplicate nodes by the non-idempotent `CREATE` command.
 
-Is there a defensive procedure we could use to guard against this case and scenario?  Well yes. When we use `MERGE` this command matches upon labels (EmailMessage) and properties `{message_id: "hjj56wqr...", internal_id: "kwhkjw76..." }` where it considers all of these properties as a pattern, which it uses as the primary key. `CREATE` is blind, but faster.  `CREATE` *would* create two separate nodes with the same properties *if* all those properties were identical. But duplications of *all*  those properties cannot happen, because, it was guaranteed by "bin/mbox_pre-parser.rb" that it was impossible that `internal_id`s would be permitted to be duplicated, for example, where both the `original_message_id` and `message_body` were repetitions.  Therefore we may do a `CREATE (q)-[:MESSAGE_IS_A_REPLY_TO_MESSAGE]-(p)` where one of the reference Message-IDs in p accidentally appeared twice due to a broken MUA, because in this case the `internal_id`s would be different because the `message_body`s would be different. Therefore we *can* use `CREATE` within out Cypher for the creation of EmailMessage nodes. To re-iterate, this is because we *will*, at ingest time, reject exact duplications of the same email message (which will thus have the same `internal_id`).
+Is there a defensive procedure we could use to guard against this case and scenario?  Well yes. When we use `MERGE` this command matches upon labels (EmailMessage) and properties `{original_message_id: "hjj56wqr...", internal_id: "kwhkjw76..." }` where it considers all of these properties as a pattern, which it uses as the primary key. `CREATE` is blind, but faster.  `CREATE` *would* create two separate nodes with the same properties *if* all those properties were identical. But duplications of *all*  those properties cannot happen, because, it was guaranteed by "bin/mbox_pre-parser.rb" that it was impossible that `internal_id`s would be permitted to be duplicated, for example, where both the `original_message_id` and `message_body` were repetitions.  Therefore we may do a `CREATE (q)-[:MESSAGE_IS_A_REPLY_TO_MESSAGE]-(p)` where one of the reference Message-IDs in p accidentally appeared twice due to a broken MUA, because in this case the `internal_id`s would be different because the `message_body`s would be different. Therefore we *can* use `CREATE` within out Cypher for the creation of EmailMessage nodes. To re-iterate, this is because we *will*, at ingest time, reject exact duplications of the same email message (which will thus have the same `internal_id`).
 
-## Reading a raw inbox and each emails' encoding :
+## Reading a raw inbox, and each emails' encoding :
 I am concerned that when "bin/mbox_pre-parser.rb" parses a very large inbox, it might choke if it initially attempts naively to get an array of individual raw emails in order to process them. The answer is to Stream it. A generator/Enumerator that `yield`s one `Mail:Message` at a time via `IO#each_line` with a "From " sentinel: `File.open(path) { |f| EnumMailer.new(f).each { |msg| ... } }`. For pure extraction without Mail parsing, this is even simpler : `Mailbox::Mbox.new(path)` (which streams internally), or a hand-rolled state machine that buffers lines between `From ` boundaries. Memory stays O(1 message) regardless of inbox size. As we are worried about encoding too, `IO#set_encoding('binary') before the loop.
 
 ## Streaming mboxParser for Large Inboxes
@@ -2843,14 +2853,13 @@ This gives you streaming I/O at the file level with proper MIME parsing at the m
 ```ruby
 StreamingMbox.new(path).each_with_index do |raw, idx|
   msg = Mail.read_from_string(raw)
-  next if seen_set.include?(msg.message_id) # dedup
+  next if seen_set.include?(msg.original_message_id) # dedup
 
   internal_id = next_internal_id
   store_message(internal_id, msg, raw)
-  seen_set.add(msg.message_id)
+  seen_set.add(msg.original_message_id)
 end
 ```
-
 #### Resumability
 For truly massive inboxes, add a checkpoint:
 ```ruby
@@ -2875,10 +2884,10 @@ Some old mbox files contain `From` inside message bodies (no escape in mbox form
 * Use `binary` mode for reading, detect encoding per-message if needed.
 * Some mbox archives use `\r\n` line endings, some `\n`, some mix. Use `f.each_line` without a specific line separator to handle all three.
 
+"bin/mbox_pre-parser.rb" opens the mbox as a read binary. After streaming the inbox to extract an individual raw email, and after detaching the attachments for later RAG reference and retrieval, and after after extracting the Message-ID, then, for each message, it checks whether the field as `Content-Type: charset` is present within each message, reading the message in the charset specified if it is ; and if this charset field is not present, we auto-detect the encoding of this email using the `charlock_holmes` gem, and if `charlock_holmes` chokes, we assume that the email body is written in UTF-8, in which case we also proceed by replacing unrepresentable bytes with "?".  Otherwise, if we *don't* do any of this character-set detection, the ruby programming language (which this project is written in) may treat strings within the email as raw bytes (ASCII-8BIT), but JSON (the format which the shard files gets written into) needs valid UTF-8.
+
 ### Empty Messages
 The `from_any?` guard (`buffer.any?`) handles consecutive From sentinels or trailing sentinels at EOF.
-
-"bin/mbox_pre-parser.rb" opens the mbox as a read binary. After streaming the inbox to extract an individual raw email, and after detaching the attachments for later RAG reference and retrieval, and after after extracting the Message-ID, then, for each message, it checks whether the field as `Content-Type: charset` is present within each message, reading the message in the charset specified if it is ; and if this charset field is not present, we auto-detect the encoding of this email using the `charlock_holmes` gem, and if `charlock_holmes` chokes, we assume that the email body is written in UTF-8, in which case we also proceed by replacing unrepresentable bytes with "?".  Otherwise, if we *don't* do any of this character-set detection, the ruby programming language (which this project is written in) may treat strings within the email as raw bytes (ASCII-8BIT), but JSON (the format which the shard files gets written into) needs valid UTF-8.
 
 The "bin/mbox_pre-parser.rb" may split a long thread into separate output shard files ; and the "bin/mbox_pre-parser.rb", at ingest time, may split a long mbox across the output shard files into separate shard files filled up each one at a time (not interleaved) every 1000 entries (or whatever your `--shard-size M` option is).   
 
@@ -2886,52 +2895,23 @@ The "bin/mbox_pre-parser.rb" may split a long thread into separate output shard 
 These have ***no*** record of DSRs. They are fat : they contain the `message_body` and *all* the metadata which is extracted from the mbox which was deemed relevant.
 
 ## Do the train/val/test pool/set JSONL files contain the actual message_body?
-No. These are "skinny" : containing only the (non-windowed) metadata as `internal_id: thread_id:, ingest_path:, shard_file:, line:`.  Of these fields the only metadata field taken from the fat shard files, which these super-skinny non-windowed pool files contain, is `internal-id`, and they *do not* contain the `message_body`.  These files as "train.jsonl", that of "val.jsonl", or that of "test.jsonl", contain the (non-windowed) metadata as `internal_id:, split_tag:, ingest_path:, line:` which is extraced from the data within the "threads" staging area in order that the further stages as pre-LoRA training, and LoRA training, can just iteratively parse these pool files.  It is necessry to have specific pool files to input to the stage as pre-LoRA, in order that pre-LoRA can operate upon them.  
+No. These are "skinny" : containing only the (non-windowed) metadata as 
+```jsonl
+{
+  "thread_id": "b7n9s0",
+  "internal_ids": ["abc123", "def456", "a1b2c3"] 
+}
+```
+Of these fields the only metadata field taken from the fat shard files, which these super-skinny non-windowed pool files contain, is each of the `internal-id`s, and these pool/set files do *not* contain the `message_body`.  These files as "train.jsonl", that of "val.jsonl", and that of "test.jsonl", contain the metadata which is extracted from the data within the "threads" staging area, split upon `thread_id`, which will be needed by the further stages as pre-LoRA training, and LoRA training.  It is necessary to have specific pool files to input to the stage as pre-LoRA, in order that pre-LoRA can operate upon them.  
 
-The shard files output from "bin/mbox_pre-parser.rb" during ingest are JSONL files which were generated by "bin/mbox_pre-parser.rb", and which contain the actual `message_body`s and all the other metadata which is used within RAG building. 
+The shard files which are output from "bin/mbox_pre-parser.rb" during ingest, are JSONL files which were generated by "bin/mbox_pre-parser.rb", and which contain the actual `message_body`s and all the other metadata. 
 
-## Won't the rematerializing to the whole pool/set files every time a new batch/corpus of emails arrives be costly in terms of processing and disk I/O?
-In practice, no. This is because the pool files as "train.jsonl", "val.jsonl", and "test.jsonl" are just metadata, not `message_body`s, so even a million threads is maybe 50-100MB of JSON, which can be written to quickly.  The rewriting to the train/val/test JSONL files will happen quite quickly upon a modern disk. The costly work is the parsing of mbox files, and tokenizing the decribbed and scrubbed `message_body`s, the latter of which dwarfs the manifest I/O by orders of magnitude. 
+# Let us examine LoRA training, and pre-LoRA training.
+## Won't the rematerializing to the whole pool/set files each time we want to retrain LoRA be costly in terms of processing and disk I/O?
+In practice, no. The pool files as "train.jsonl", "val.jsonl", and "test.jsonl" are just metadata, not `message_body`s, so even a million threads is maybe 50-100MB of JSON, which can be written to quickly.  The rewriting to the train/val/test JSONL files will happen quite quickly upon a modern disk. The costly work is the parsing of mbox files, and tokenizing the decribbed and scrubbed `message_body`s, which dwarfs the manifest I/O by orders of magnitude. 
 
-## "bin/splitter.rb" outputs the pool files as "train.jsonl", "val.jsonl", and "test.jsonl".
-These outputted files contains ***no*** windowing, and contains ***no*** DSR records. "bin/splitter.rb" writes these pool files as "train.jsonl", "val.jsonl", and "test.jsonl" in one pass.
-
-## Why does "bin/mbox_pre-parser.rb" output shard files?
-Recall that "bin/mbox_pre-parser.rb" is being called upon a raw MBOX. Raw mboxes are often one huge file per list history so far, or per month, or per week.  The pre-parser converts the physical MBOX into logical JSONL Rows. A **Logical Row** is the *atom* (one single email or thread entry), while a **Shard** is the *bucket* (the actual JSONL file holding thousands of those atoms).  The pre-parser outputs shards so that the downstream tools (which are invoked at pre-LoRA training time) can process data in parallel chunks instead of choking upon one massive 50GB file.
-
-"bin/mbox_pre-parser.rb" walks messages in order and assigns each one to exactly one part-XXXXXX.jsonl file, so that together the shards are just a clean partition of the body of emails, rather than containing overlapping copies of each other.
-
-"bin/mbox_pre-parser.rb" writes to JSONL shard files (e.g. "./pre-parsed/until_2026-03-24T18:47:00Z_000002/part-000001.jsonl"). This directory may contain many shard files. The stage as pre-LoRA will glob each of those directories which are listed within the file as "manifest_of_ingested_mboxes.jsonl", sorting these in order by filename, each of which shall be parsed in order.  
-
-Shards are non-overlapping.
-
-## Why do we produce flat pool files (not sharded) as the output from "bin/splitter.rb"
-Note that for simplicity, and downstream tooling for the training of LoRA, the outputs from "bin/splitter.rb" are materialized as single flat files as "train.jsonl", "val.jsonl", and "test.jsonl", as these contain metadata only, and are quite "skinny", and thus require inexpensive disk I/O (input/output) on a modern solid state drive, and interface.  The costly work is the parsing of MBOX files during pre-processing, and the tokenizing of email bodies during training of LoRA.
-
-In our code base there is no ruby file that chops "train.jsonl" into shards ; "bin/splitter.rb" merely produces one flat "train.jsonl" file for pre-LoRA, and the actual "sharding" within LoRA training, happens later inside the training stack's data loader (e.g. the finetune script, / vLLM or PyTorch+DeepSpeed job that reads the Alpaca data structures from pre-LoRA training time, and can automatically segregate and allocate each Alpaca training data the across workers at LoRA training time asynchronously) after the `message_body`s have been pii-scrubbed and decribbed and stored at a temporary SHARDED staging area to be passed to the actual LoRA training.  Think of this as a final form of sharding the data curated `message_body`s for LoRA training so that this final training stage won't choke on one massive file, and will be able to process these data-curated shards in parallel.
-
-## When are my unique thread_id's created?  
-These are ***not*** created by "bin/mbox_pre-parser.rb".  They *are* created by KG WCC as a third pass upon the knowledge graph. Recall that the second pass is to be tying up dangling edges to their proper node destination between windows, and that the first pass was creating phantom nodes for this second pass to resolve, if that were possible. If not possible, due to a missing target data due to an email never arriving, or being out of bounds of our corpora of mboxes, then, later, on this third pass, WCC as well as determining the `thread_id` for every EmailMessage node, also fixes phantoms so that these don't get written out to our output thread staging area to be later input into "bin/splitter.rb" which will assigns to one deterministic split from each of these `thread_ids`.
-
-## How does KG deal with phantoms internally when its own KG is being queried?
-KG exposes them as valid neighbours with only a `message_id` property, and without an `internal_id` one, signaling to the RAG agent that while the topological link is real, the destination is void of content and cannot be hydrated.
-
-## Is there any point to a `window_maker.rb` without a subsequent retrain of the model?
-Yes.  This is done so that KG will have an updated data source, with all the latest DSR removed, and (if ingest and digest have already most recently occurred) with all the latest emails from the latest corpora, for regeneration of the KG from scratch.
-
-To spot-check data quality (encoding errors, schema conformance) the email-body is required to be inspected, not these "skinny" metadata-only files. 
-
-## Tell me again. Won't DSR tombstones break reproducibility?  
-Answer. Yes, deliberately. That is the legal tradeoff.  You *cannot*, and *must not*, reproduce data a person exercised their GDPR right to erase, but you still preserve *attestation* : this being an auditable record of what had been removed from "train.jsonl", "val.jsonl", and "test.jsonl", for training time, in a tombstone log output showing what was removed and when.  So your audit trail becomes, "This particular LoRA (reference name) was trained after DSR removed X, Y, Z". 
-
-## Would running `splitter.rb` to include recently arrived emails for training the LoRA adapters, break reproducibility? 
-Do you mean the reproducibility of creating the trained LoRA adapters?  If so, then the answer is yes, because they are never reproducible, due to the fact that the data we are curating upon is a dynamically updating target.  Thus we lose reproducibility of recreating any LoRA adapter, i.e. you are putting more metadata into your pool/set files : which reference real newly arriving email data from shard files (output from "bin/pre-parser.rb"). Also "bin/splitter.rb" can always break reproducibility due to independently arriving DSR tombstones within the manifest file as "manually_excluded_tombstones.jsonl". The point being, that as soon as you issue a `window_maker.rb` and a subsequent `KG_builder.rb`, you *will* lose reproducibility due to the `thread_id`s being different each time. In addition to these considerations, consider this.  Can you guarantee that all of your hyperparameters are constant, and that the implementation details of the hardware you are training upon is the same? The point of an AI is that it is supposed to appear pseudo-intelligent, of course, so should you really be thinking of it like a chemistry experiment?  Ought you really be thinking of AI training to be as an example of deterministic programming?
- 
-## If we have materialized all the ingested and digested emails up to, and including, the emails by the date of 2025-06-01, but *don't* recreate KG until 2025-08-07, then will the KG trained in August still be useful after the bump in June?
-Apart from this delay being a funny way to work, DSRs received in July 2025 will *not yet* have resulted in their corresponding rows being filtered from the pools/sets which are output from "bin/splitter.rb", because the latest DSR tombstones within the manifest as "manually_excluded_tombstones.jsonl" won't have become omitted from the latest versions of "train.jsonl", "val.jsonl" or "test.jsonl".  So the answer is : in practice, you will have forgotten to remove the DSRs from the pools/sets, *and* you will have *not* included the latest corpora of emails between the June 2025 and the moment when "bin/window_maker.rb" was run in August 2025 (resulting in rematerialization of metadata into the files as "train.jsonl", "val.jsonl" and "test.jsonl"),
-
-## What time of day to retrain LoRA?
-The training of the model may now be scheduled for an overnight retrain, if electricity is cheaper then.  
+## What are cribs?
+Cribs are certain sign-offs, and other common repetitive patterns, appearing within emails at certain predictable places within the email body texts, and also at other places. For example, if Hans always signs off with his address, then this crib will appear both in the set as "train", and the set as "val", or the set as "test", every time an email from Hans appears in these sets, albeit on separate email threads. This would be contamination of data between sets.
 
 ## What is drift?
 Drift is the gap that opens when the distribution or meaning of data coming in shifts away from what the model was trained/evaluated upon. Think of "data drift" as something that happens when the data being input changes. For instance, if, on a professional mailing list for dental surgeons, a lot of emails arrive talking about fluffy dogs, then this is "data shift" because the vocabulary has shifted.
@@ -2943,69 +2923,131 @@ In short, drift is a distribution mismatch between what the model has as data we
 ## What would "label drift"?
 "Label drift" is when the class mix of emails changes : that is, the proportion of each type of email in our data changes. For instance, if on a professional mailing list for dental surgeons, a lot of emails arrive talking about fluffy dogs then a *human* may label this email as "superfluous" *before* training, at the labelling stage, in order to audit the annotation pipeline carefully. "Label drift" happens when this mix of labels changes, i.e. when the label as "superfluous" suddenly jumps from 2% to 15%. 
 
-Can I automate the decision of labelling in response to the content of the reply to these messages about fluffy dogs on the dental surgeons' mailing list? For example, if the reply was "Please keep subject matters relevant to the topic of this list.", then is there any way to automate the process of labelling these messages as "superfluous" based upon the content of the mailing list?  Answer.  Yes. That is called "weak supervision", or "distant supervision".  You could write heuristics, that pattern-match reply content, to automatically generate labels like "superfluous".  Tools like Snorkel formalize this by combining multiple noisy labelling functions into probabilistic labels : trading annotation precision for massive scaling without hiring an army of human taggers, whereby you write "Labelling Functions" (mini-scripts like regexes, heuristics, or small LLM models, which either propose a label, or abstain from doing so), which cast "votes" in order to make these decisions. A "Label Model" mathematically learns which "Labelling Functions" are reliable and which are noisy, and then merges their votes into a single high-quality probabilistic label for every row.
+Can I automate the decision of labelling in response to the content of the reply to these messages about fluffy dogs on the dental surgeons' mailing list? For example, if the reply was "Please keep subject matters relevant to the topic of this list.", then is there any way to automate the process of labelling these messages as "superfluous" based upon the content of the mailing list?  Answer.  Yes. That is called "weak supervision", or "distant supervision".  You could write heuristics, that pattern-match reply content, to automatically generate labels like "superfluous".  Tools like Snorkel formalize this by combining multiple noisy labelling functions into probabilistic labels, trading annotation precision for massive scaling without hiring an army of human taggers, whereby you write "Labelling Functions" (mini-scripts like regexes, heuristics, or small SLM models, which either propose a label, or abstain from doing so), which cast "votes" in order to make these decisions. A "Label Model" mathematically learns which "Labelling Functions" are reliable and which are noisy, and then merges their votes into a single high-quality probabilistic label for every row.
 
-The reason why, for our data curation, it is probably *not* a good idea to have any labelling at all, is because we would be confusing the content, and style, of the email bodies, with these extra generated labels.  Would these labels be considered metadata?  If so, this *might* be utilisable within semantic RAG searches, but would not really be useful, I say, in training the LoRA adapter, because LoRA learns the language and style from the content of the email-bodies.  I say, this content ought not be sullied with labels put into the Alpaca format we are feeding in to LoRA training because we are not using any metadata, whether labels or otherwise, within our Alpaca format which is cast staged once at the output of pre-LoRA training, to be fed into LoRA training upon every epoch.  It is also essential that we cast and stage each of our sets as "train", "val", and "train" at the end of pre-LoRA training once, so that the training of LoRA can read these formats and bake the Alpaca data from each set into tensors, so that the LoRA TRAINER will process these tensors every epoch, comparing those from "train" with those from "val" to make sure that perplexity is not spiking, and then comparing the most recent fully-trained LoRA adapter with those baked tensors constructed from the Alpaca format derived from the set as "test". 
+The reason why, for our data curation, it is probably *not* a good idea to have any labelling at all, is because we would be confusing the content, and style, of the email bodies, with these extra generated labels.  Would these labels be considered metadata?  If so, this *might* be utilisable within semantic RAG searches, but would not really be useful, I say, in training the LoRA adapter, because LoRA learns the language and style from the content of the email-bodies.  I say this content ought not be sullied with labels put into the Alpaca format we are feeding in to LoRA training, because we are not using any metadata, whether labels or otherwise, within our Alpaca format which is cast as **staged** once at the output of pre-LoRA training : to be fed into LoRA training upon every epoch.  
 
-Another reason why, within our particular codebase as mboxMinerva, as a coding decision, it is *not* a good idea to make labels on the data, is because *if* the labels are computed dynamically at either ingest, or digest, time, then reproducibility of the labels themselves would break, because the labels may change several times within one cohort even, or over the space of several cohorts also : later data (emails arriving and being processed) may change the "votes" cast by earlier data.  For example, if the response to the first email about fluffy cats on the dental surgeons' mailing list was "Yeah, yeah. Roll over, Beethoven.", then RAG might not pick up upon the implication that the fluffy cats were "superflous", and might list the email as "relevant", but the second message might be "Please stop spamming this list.", at which point the model might realise the truth.  This is the particular reason why labelling is problematic for its use in RAG.  The brittleness of our labels as metadata, might break due to label drift in the future, in which case we would have to rebuild our metadata choosing what?  The first label, or the second label, as a paradigm? Therefore to keep the RAG implementation simple and pure we ought not bother with labelling at all. 
+It is also essential that we cast data from the staging area as each of our pools/sets as "train.jsonl", "val.jsonl", and "train.jsonl" at the end of pre-LoRA training once, so that the training of LoRA can read these staged Alpaca files, and thus bake the Alpaca data from each set into tensors, so that the LoRA TRAINER will process these tensors every epoch, comparing those from "train" with those from "val" to make sure that perplexity is not spiking, and afterwards, as a final exam, comparing the most recent fully-trained LoRA adapter with those baked tensors constructed from the Alpaca format derived from the set as "test", before flipping a symlink in order to start serving the LLM with this latest LoRA adapter that sits atop of it. 
 
-So, because label reproducibility would be broken, it would not be a good idea to stamp a record of these labels into the manifest, even for RAG. We ought to be keeping the manifest purely structural. Look. The RAG is a semantic search by Vector, and a non-semantic search by BM25, of email body contents, plus a search of structural relationships via KG.  Therefore adding labels to the metadata makes things brittle, because it assumes we can summarize our email into a label content in the first place.  This is like a tag on an image, or a video, of a post, from the old days, in an attempt to facilitate a search function to find these tags.  We are instead, to use the latest technology of having the meaning of text semantically embedded within a Vector database. Therefore, we don't need these "labels" as metadata.  Therefore, we can forget the idea of letting classification logic (the code/prompts/rules of this "weak supervision") live in a separate independently versioned RAG layer within (or potentially outside of) the mboxMinerva git repo.  We now no longer need to bother worrying about code which will let us debug, test, and rollback to known good versions of these heuristics, if a new heuristic misfires.  Keeping the project simple here, is not only going to be more efficient to the performance of the project, but it is also a way to avoid an over-complicated headache, and it seems to be just the correct way to do this data curation.
+Another reason why, within our particular codebase as mboxMinerva, as a coding decision, it is *not* a good idea to make labels on the data, is because *if* the labels are computed dynamically at either ingest, or digest, time, then reproducibility of the labels themselves would break, because the labels may change several times within one cohort even, or over the space of several cohorts also : whereby later data (emails arriving and being processed) may change the "votes" cast by earlier data.  For example, if the response to the first email about fluffy cats on the dental surgeons' mailing list was "Yeah, yeah. Roll over, Beethoven.", then RAG might not pick up upon the implication that the fluffy cats were "superflous", and might list the email as "relevant", but the second message might be "Please stop spamming this list.", at which point the model might realise the truth. This is the particular reason why labelling is problematic for its use in RAG. The brittleness of our labels as metadata, might break due to label drift in the future, in which case we would have to rebuild our metadata choosing what?  The first label, or the second label, as a paradigm? Therefore to keep the RAG implementation simple and pure we ought not bother with labelling at all. 
+
+So, because label reproducibility would be broken, it would not be a good idea to stamp a record of these labels into the manifest, even for RAG. We ought to be keeping the manifest purely structural. Look. The RAG is a semantic search by Vector, and a non-semantic search by BM25, of email body contents, plus a search of structural relationships via KG. Therefore adding labels to the metadata makes things brittle, because it assumes we can summarize our email into a label content in the first place.  This is like a tag on an image, or a video, of a post, from the old days, in an attempt to facilitate a search function to find these tags.  We are instead, to use the latest technology of having the meaning of text semantically embedded within a Vector database. Therefore, we don't need these "labels" as metadata. Therefore, we can forget the idea of letting classification logic (the code/prompts/rules of this "weak supervision") live in a separate independently versioned RAG layer within (or potentially outside of) the mboxMinerva git repo.  We now no longer need to bother worrying about code which will let us debug, test, and rollback to known good versions of these heuristics, if a new heuristic misfires.  Keeping the project simple here, is not only going to be more efficient to the performance of the project, but it is also a way to avoid an over-complicated headache, and it seems to be just the correct way to do this data curation.
+
+# Let us revise some more.
+## When are my unique thread_id's created?  
+These are ***not*** created by "bin/mbox_pre-parser.rb".  They *are* created by KG WCC as a third pass upon the knowledge graph. Recall that the second pass is to be tying up dangling edges to their proper node destination between windows, and that the first pass was creating phantom nodes for this second pass to resolve, if that were possible. If not possible, due to a missing target data due to an email never arriving, or being out of bounds of our corpora of mboxes, then, later, on this third pass, WCC, as well as determining the `thread_id` for every EmailMessage node, also fixes phantoms so that these don't get written out to our output thread staging area to be later input into "bin/splitter.rb" which will assigns to one deterministic split from each of these `thread_ids`.
+
+## Why do we produce flat pool files (not sharded) as the output from "bin/splitter.rb"
+Note that for simplicity, and downstream tooling for the training of LoRA, the outputs from "bin/splitter.rb" are materialized as single flat files as "train.jsonl", "val.jsonl", and "test.jsonl", as these contain metadata only, and are quite "skinny", and thus require inexpensive disk I/O (input/output) on a modern solid state drive, and interface. The costly work is the parsing of MBOX files during pre-processing, and the tokenizing of email bodies during training of LoRA.
+
+In our code base there is no ruby file that chops "train.jsonl" into shards ; "bin/splitter.rb" merely produces one flat "train.jsonl" file for pre-LoRA, and the actual "sharding" within LoRA training happens later inside the training stack's data loader (e.g. the finetune script, / vLLM or PyTorch+DeepSpeed job that reads the Alpaca data structures from pre-LoRA training time, and can automatically segregate and allocate each Alpaca training data the across workers at LoRA training time asynchronously). This actual "sharding" happens *after* the `message_body`s have been pii-scrubbed and decribbed and staged/stored as Alpaca files to be passed to the actual LoRA training.  Think of this as a final form of sharding of the data curated Alpaca format file produced from `message_body`s for LoRA training so that this final training stage won't choke, and will be able to process these data-curated shards in parallel. There is nothing I need to think about in terms of the HF (Hugging Face) internally creating shards which are produced by my finetune script as HF maps our Alpaca JSONL to Arrow with its own internal chunking. `peft`/`SFTTrainer` handles checkpoint shards too. 
+
+## "bin/splitter.rb" outputs the pool files as "train.jsonl", "val.jsonl", and "test.jsonl".
+"bin/splitter.rb" writes these pool files as "train.jsonl", "val.jsonl", and "test.jsonl" in one pass.
+
+## Why does "bin/mbox_pre-parser.rb" output shard files?
+Recall that "bin/mbox_pre-parser.rb" is being called upon a raw MBOX. Raw mboxes are often one huge file per list history so far, or per month, or per week. The pre-parser converts the physical MBOX into logical JSONL Rows. A **Logical Row** is the *atom* (one single email or thread entry), while a **Shard** is the *bucket* (the actual JSONL file holding thousands of those atoms). The pre-parser outputs shards so that the downstream tools (which are invoked at RAG building time, and RAG retrieval time, and pre-LoRA training time) can perform hydration to `message_body`s and process this data, or other metadata, in parallel instead of choking upon one massive 50GB fat ingested not-sharded file.
+
+"bin/mbox_pre-parser.rb" walks messages in order and assigns each one to exactly one part-XXXXXX.jsonl file, so that together the shards are just a clean partition of the body of emails, rather than containing overlapping copies of each other. Recall also that email-message deduplication happens also upon and `internal_id`s, a record of which may be referred to by the sqlite database which is as the file as "skinny_shard_index.jsonl".
+
+"bin/mbox_pre-parser.rb" writes to JSONL shard files (e.g. "./pre-parsed/until_2026-03-24T18:47:00Z_000002/part-000001.jsonl"). This directory may contain *many* shard files, each corresponding with a particular mbox. The stage as pre-LoRA training will glob each of those directories which are listed within the file as "manifest_of_ingested_mboxes.jsonl", sorting these in order by filename, each of which shall be parsed in order.  
+
+Shards are non-overlapping.
+
+## How does KG deal with phantoms internally when its own KG is being queried?
+A phantom Message-ID is one that appears in another message's References header, or In-Reply-To header, but has no corresponding EmailMessage node yet (see [The `thread_id` problem](#the-thread_id-problem)). KG exposes them as valid neighbours with only an `original_message_id` property, where `internal_id` equals `nil`, signalling to the RAG agent that while the topological link is real, the destination is void of content and cannot be hydrated.
+
+## Is there any point to a `window_maker.rb` without a subsequent retrain of the model?
+Yes. This is done so that KG will have an updated data source, with all the latest DSR removed, and (if ingest and digest have already most recently occurred) with all the latest emails from the latest corpora, for regeneration of the KG from scratch.
+
+## Tell me again. Won't DSR tombstones break reproducibility?  
+Answer. Yes, deliberately. That is the legal tradeoff. You *cannot*, and *must not*, reproduce data a person exercised their GDPR right to erase, but you still preserve *attestation* : this being an auditable record of what had been removed from "train.jsonl", "val.jsonl", and "test.jsonl", for training time, in a tombstone log output showing what was removed and when.  So your audit trail becomes, "This particular LoRA (reference name) was trained after DSR removed X, Y, Z". 
+
+## Would running `splitter.rb` to include recently arrived emails for training the LoRA adapters, break reproducibility? 
+Do you mean the reproducibility of creating the trained LoRA adapters?  If so, then the answer is yes, because they are never reproducible, due to the fact that the data we are curating upon is a dynamically updating target.  Thus we lose reproducibility of recreating any LoRA adapter, i.e. you are putting more metadata into your pool/set files : which reference real newly arriving email data from shard files (output from "bin/pre-parser.rb"). Also "bin/window_maker.rb" can always break reproducibility due to independently arriving DSR tombstones within the manifest file as "manually_excluded_tombstones.jsonl". The point being, that as soon as you issue a `window_maker.rb` and a subsequent `build_the_KG.rb`, you *will* lose reproducibility due to the `thread_id`s being different each time. In addition to these considerations, consider this. Can you guarantee that all of your hyperparameters are constant, and that the implementation details of the hardware you are training upon is the same? The point of an AI is that it is supposed to appear pseudo-intelligent, of course, so should you really be thinking of it like a chemistry experiment?  Ought you really be thinking of AI training to be as an example of deterministic programming?
+
+## What time of day to retrain LoRA?
+The training of the model may be scheduled for an overnight retrain, if electricity is cheaper then.  
 
 ## What about automatic notifications and included advice?
-We can bake in email and Slack/webhooks, so that when exclusion-backlog or drift indicators cross a configurable threshold, the admin gets a message that:
+We can bake in email and Slack/webhooks, so that when exclusion-backlog (during ingest) or drift indicators (during LoRA training) cross a configurable threshold, the admin gets a message that:
 
 - (a) shows the current stats, 
 - (b) states which key performance area this indicator pertains to, 
-- (c) recommends a definite action, such as "time to bump the pin", or "time to schedule a retrain on cohorts less than or equal to a specific PIN", or "tighten contamination thresholds for these cohorts".  
+- (c) recommends a definite action, such as "time to digest and rebuild RAG", or "tighten contamination thresholds prior to training".  
 
-To wire it into your repo, edit `config/alerts.yml` with your SMTP/Slack URLs, and schedule via cron (`0 9 * * 1`) or GitLab pipeline schedules, (e.g. when exclusion-backlog hits 15% it'll tell you "do bump the pin to 2025-04 and schedule a training of LoRA to replace the existing LoRA adapter", or when contamination crosses 1% it will recommend "do tighten contamination thresholds", or when tombstones pile up past 100 it nudges you toward a retrain of LoRA).
+To wire it into your repo, edit `config/alerts.yml` with your SMTP/Slack URLs, and schedule via cron (`0 9 * * 1`) or GitLab pipeline schedules, e.g. when exclusion-backlog hits 15% it will tell you "digest and retrain to current mbox corpora", and "schedule a training to LoRA to replace the existing LoRA adapter", or when contamination crosses 1% it will recommend "do tighten contamination thresholds", or when tombstones pile up past 100 it nudges you towards a RAG rebuild and a retrain of LoRA.
 
 TO DO. Store state about exlusion backlog + other similar stats on backend (host).
 
 ## What would a "Rolling Retention Policy" be?
-A **Rolling Retention Policy** *would* tell the splitter to filter by data freshness, and to ignore data older than `N` days/months/years relative to the pin, ensuring that your model trains only on relevant, recent patterns, and isn't going to be trained upon ancient, drifted history : drifted, because the "ground truth" changes as the world evolves ; vocabulary shifts (new slang evolves, old terms become deprecated), spammers use newer tactics to evade filters, and crucially, the structure of business data within an organisational structure might change, (e.g. a "purchase order" from 2018 might look completely different than one from 2025), meaning that patterns from very old data might mislead the model about today's reality.
+A **Rolling Retention Policy** *would* tell the digest phase to filter by data freshness, and to ignore data older than `N` days/months/years relative to the pin, ensuring that your model trains only on relevant, recent patterns, and isn't going to be trained upon ancient, drifted history : drifted, because the "ground truth" might change as the world evolves ; vocabulary shifts (new slang evolves, old terms become deprecated), spammers use newer tactics to evade filters, and more crucially, the structure of business data within an organisational structure might change, (e.g. a "purchase order" from 2018 might look completely different than one from 2025), meaning that patterns from very old data might mislead the model about today's reality.
 
 ## Why we *don't* use a "Rolling Retention Policy"?
-Because:
-- 1. Although no rows would subsequently disappear from our fat ingested shard files, we would be saying that these earlier rows would subsequently become barred from being read, after they had timed out, when "bin/splitter.rb" became invoked. This would totally break RAG recording of historical details, and potentially impede the LoRA traing because of, and in the sense of, the following point (2).
-- 2. Sometimes the stale data would be perfect for making generalisations from.  Older does not always necessarily mean that it should be treated as obsolete. That is a truism.
+We don't do this because, although no rows would subsequently disappear from our fat ingested shard files, we would be saying that these earlier rows would subsequently become barred from being read, after they had timed out, when "bin/splitter.rb" became invoked. This would totally break RAG's recording of historical details, and potentially impede the LoRA training because sometimes the stale data would be perfect for making generalisations from. Older does not always necessarily mean that it should be treated as obsolete. That is a truism.
 
 ## What is "Lookback Horizon" for the data curation?
-It is how many months/cohorts of historical data you include in your training corpus. Within our project we include *all* of it, prior to a specified pin (with the exception of DSR requests).  It shapes *what* the model learns.
+It is how many months/cohorts of historical data you include in your training corpus. Within our project we include *all* of it (with the exception of DSR requests). It shapes *what* the model learns.
 
 ## What is "Lookback Horizon" for the training of the model?
-A "Lookback Horizon" in this context is a model, or inference-time, configuration set in your training.  It is ***not*** within the data pipeline.  It is a concept pertaining to model inference specifically dealing with how far back the model's attention span reaches.  It is how much preceding context you feed the model when training it to predict the next token/response.  
+A "Lookback Horizon" in this context is a model, inference-time, configuration setting in your training. It is ***not*** within the data pipeline. It is a concept pertaining to model inference specifically dealing with how far back the model's attention span reaches. It is how much preceding context you feed the model when training it to predict the next token/response.  
 
 ## What is "Lookback Horizon" for the vLLM?
-At inference time, lookback horizon is how much of the conversation history (system prompt + user messages + assistant replies), so far, the vLLM keeps within the key-value cache when generating the next token. The lookback horizon is bounded by the "Input window length" for the vLLM (e.g. 8k tokens), which is sometimes known as the "Context Window Length" within the industry.
+At inference time, lookback horizon is how much of the conversation history, so far, the vLLM keeps within the key-value cache when generating the next token. The lookback horizon is bounded by the "Input window length" for the vLLM (e.g. 8k tokens), which is sometimes known as the "Context Window Length" within the industry.
+
+The lookback horizon is the total number of tokens an LLM can attend to in one forward pass, bounded by the context window (`n_ctx`). Component-wise:
+
+1. **System prompt** - your rules, persona, RAG assembly instructions, etc.
+2. **Retrieved evidence** - the `<message>` blocks from RAG, often the biggest chunk.
+3. **Conversation history** - prior user/assistant turns.
+4. **Current user query** - the actual input.
+5. **Safety reserve** - headroom for the response to generate into.
+
+What's left after 1-4 determines how much of the conversation can "fit" before older turns get silently dropped or truncated. The key subtlety: even when everything fits, positional encodings like RoPE introduce a soft attention decay, whereby recent tokens get higher attention weight than distant ones. So your lookback functionally degrades before it architecturally clips. This is why putting RAG evidence late (close to the query) matters : you are fighting that decay. RoPE is Rotary Position Embedding : whereby attention scores depend upon **relative** offset, not absolute index, which is achieved by rotating query/key pair by angle θᵢ.position in 2D suspaces.
 
 ## What is "Input Window Length" for the vLLM?
 This, also more commonly known as the "Context Window Length" for the vLLM, is how many tokens the model can see in a single forward pass at inference time (e.g. 8k or 128k tokens of conversation). It shapes *how much* input it can reason over at any moment. It is a hard ceiling that was fixed when the model was originally trained. 
 
 ## During the training of LoRA, do we have a System Prompt?
-Yes. You include the System Prompt tokens within the Context Window during training.  You feed the TRAINER the continuous token sequence as System, Instruction, and Target.  To prevent the model learning to predict the System Prompt itself, you set PyTorch label for all System and Instruction tokens to -100.  Thus, the model learns to predict the Target tokens based upon this System Prompt and Instruction, whereby the transformer's attention mechanism read the entire sequence so that it has the full context as the System Prompt plus the Instruction, but the -100 label tells PyTorch's loss function "Don't grade me upon predicting the prompt itself.  Only grade me by my answer".  We are teaching it how to respond to the setup, not how to parrot the setup.  Think of Instruction as a stage-plays character notes and scene direction, and Target/Output as the lines the actor speaks.  Our definition of what a "Prompt" is within our LoRA training setup is {System Prompt + Instruction}, where there is not step-by-step decoding happening at all, whereby the model reads the entire Alpaca training sequence as {System + Instruction + Target} in one big parallel chunk, calculating the probability of the next token for each position simultaneously.  Only the Target tokens become graded.  On the other hand, the "Generation Context", which happens at inference time is the autoregressive decoding phase which spits out the answer one token at a time, appending each newly minted word to its "Generation Context" window so that the model know what to say next.
+Yes. You include the System Prompt tokens within the Context Window during training. You feed the TRAINER the continuous token sequence as System, Instruction, and Target/Output. To prevent the model learning to predict the System Prompt itself, you set PyTorch label for all System and Instruction tokens to -100. Thus, the model learns to predict the Target tokens based upon this System Prompt and Instruction, whereby the transformer's attention mechanism read the entire sequence so that it has the full context as the System Prompt plus the Instruction, but the -100 label tells PyTorch's loss function "Don't grade me upon predicting the prompt itself. Only grade me by my answer". We are teaching it how to respond to the setup, not how to parrot the setup. Think of Instruction as a stage-plays character notes and scene direction, and Target/Output as the lines the actor speaks. Our definition of what a "Prompt" is within our LoRA training setup is {System Prompt + Instruction}, where there is not step-by-step decoding happening at all, whereby the model reads the entire Alpaca training sequence as {System + Instruction + Target} in one big parallel chunk, calculating the probability of the next token for each position simultaneously. Only the Target tokens become graded. 
+
+On the other hand, the "Generation Context", which happens at inference time is the autoregressive decoding phase which spits out the answer one token at a time, appending each newly minted word to its "Generation Context" window so that the model know what to say next.
 
 ## What is definition of the "training window length" during LoRA training?
 Each of the sequences of tokenized text fed into LoRA at training time can be at most the maximum number of tokens which the model can process in one training example : i.e. len(System + Instruction + Target) after tokenisation.  This is typically set to match the base model's "context window length" (e.g. 2048, 4096) tokens. Shorter sequences become padded. Longer sequences become truncated (which is why we will check for this scenario first).  Don't confuse this "training window length" with the windows within our KG pipeline. These are completely unrelated concepts!
 
 ## What happens if a malicious user sends one email with 50,000 words in it (possibly garbage) in order to attempt to cause the Lookback Horizon, for the training of the model, to exceed the 8192 tokens, which was the limit of the Lookback Horizon (also called the "context window length"), baked into the model?
-This is an astute observational concern, as a single email with 50k-words (~ 37k tokens) is just one message to "bin/splitter.rb", and would cause truncation to 8192 tokens happening downstream at tokenization time.  So to avoid truncation at training time due to a malicious user sending excessively large messages to the mailing list, there exists a token/char limit to each email within `mbox_pre-parser.rb` to reject absurdly long single messages, before they even hit the shards output from "bin/mbox_pre-parser.rb" (and thus subsequently the manifest).  Doing this at ingest time will also have the added benefit whereby we are protecting RAG from these absurdly long email body lengths too, because, as they will never hit the shard files, RAG never sees them. 
+This is an astute observational concern, as a single email with 50k-words (~ 37k tokens) is just one message to "bin/splitter.rb" ; and, if garbage, ought to be dropped in our pipeline in order to prevent garbage being chunked by Butcher to RAG building, and in order to prevent LoRA being trained upon such garbage. But too large a size of a given email message is essentially a problem for the MTAs (mail transfer agents) to handle.  MTAs handle it at multiple layers:
 
-## Explain how the "Lookback Horizon" for the vLLM is bounded by the "Context window length" (both at inference time)
-The "context window length" is a physical hard bound baked into the model architecture at pre-training time (it **cannot** exceed 8192 tokens on an 8k model at all).  The "Lookback Horizon" for the vLLM is your optional choice *within* that ceiling.  You might choose to only feed in 2k tokens of history even though 8k is available ; but you can never *exceed* the architectural limit.  A token equals approximatelly 0.75 words.
+**SMTP level** - Most have `message_size_limi`t (Postfix: `message_size_limit`, Sendmail: `MaxMessageSize`). Connection gets rejected during DATA phase with a `552 5.3.4` before the full payload arrives - the MTA tracks bytes written and aborts mid-stream if exceeded.
 
-## So what exactly *are* we doing within "bin/mbox_pre-parser.rb"?
+**Queue level** - Postfix's `minimal_backoff_time`/`maximal_backoff_time` plus queue size limits (`queue_run_delay`, `maximal_queue_lifetime`) throttle repeat offenders. Some use `smtpd_client_message_rate_limit` for per-sender throttling.
+
+**Resource-level guards** - `qmail` was famously designed around this: the "paperchase" architecture limits how much data any one process can touch. Postfix uses chroot jails + process isolation so a bloated message delivery can't starve the queue runner.
+
+**Content filters** - Amavis/ClamAV scan incrementally with their own size caps, so a Shakespeare-sized payload hits the scanner's limit before it hits the full queue.
+
+**RFC 5321 compliance** - Recommends servers accept messages up to 64KB maximum; anything beyond is "courtesy" - servers are required to reject with 552 rather than silently accept and choke. The clever part: the MTA counts octets during the DATA command and closes the connection early, so the sender wastes their bandwidth, not yours.
+
+## Botnet attackers
+The real attack vector isn't one large message - it's millions of small ones. That's where rate limiting and backscatter protection actually matter.  If millions of spam messages have gotten through these filters and arrived within an mbox then without filtering out these spam messages we are not going to obtain a high-quality RAG pipeline, or a high-quality data set for LoRA training.
+
+So just say a 50k message *is* received and ingested. If it is garbage (noise) then during chunking Sieve will not output any `messages` to Butcher because these will lack a `rationale:`. If the email message received in the inbox is something like 50k of the works of Shakespeare, then Sieve *will* produce `messages` to Butcher for chunking which contain a `rationale:`. In both cases KG will record and be able to retrieve structureal relationships ; however, only in the latter will the RAG agent be able to pull any chunks to be output or sent to the LoRA-trained LLM for inference. The real concern would lie in if multiple passages of Shakespeare are being sent from multiple email addresses, each not sending enough data to trigger the MTA filters. Here Postfix `smtpd_client_connection_rate_limit` helps at SMTP time, in order to track messages per-client IP. However, a botnet of 10,000 IPs each sending 1 message/min bypasses it entirely, as this and `smtpd_client_message_rate_limit` are both single scoped. To ban all messages arriving within the time-window of a sudden burst is too blunt an axe, as we would be nuking legitmate emails caught in the burst. Better is to create a file as "bin/spotcheck_audit", whereby the wrapper file as "bin/spotcheck" will allow `spotcheck audit` with or without the option as `--write-flags-to <filename>`, which will flag messages which have both temporal anomalies.  Thus we should also have a file as "bin/spotcheck_quarantine", which must have an `--input-file <filename>` option, which `spotcheck quarantine --input-file <filename>` is a wrapper around. Thus the intermediary file is for human review for the administrator computer scientist to inspect before banning.  We will never autoban without human overseeing. We never try to censor what becomes ingested. We only try to censor that which is suspect during the digestion phase.
+
+## Explain how the "Lookback Horizon" for the vLLM is bounded by the "Input/Context window length" (both at inference time)
+The "input window length" is a physical hard bound baked into the model architecture at pre-training time (it **cannot** exceed 8192 tokens on an 8k model at all).  The "Lookback Horizon" for the vLLM is your optional choice *within* that ceiling.  You might choose to only feed in 2k tokens of history even though 8k is available ; but you can never *exceed* the architectural limit. A token equals approximatelly 0.75 words.
+
+## So what exactly are we doing within "bin/mbox_pre-parser.rb"?
 For each email message we will:
 - **Extract Message_ID**: Extract from the email header.  Or we synthesize one uniquely if it is missing.
--  **Parse the mbox file**: We parse headers splitting on "From" lines (the mbox separator) and parse headers, extracting the Message-ID from the email header (or synthesizing it uniquely if it is missing), and we generate `internal_id = sha256(Message-ID + message-body)` as a collision-proof synthetic primary key.
+- **Parse the mbox file**: We parse headers splitting on "From" lines (the mbox separator) and parse headers, extracting the Message-ID from the email header (or synthesizing it uniquely if it is missing), and we generate `internal_id = sha256(Message-ID + message-body)` as a collision-proof synthetic primary key.
 - **Deduplicate and track collisions**: Skip exact `internal_id` matches. If same Message-ID, but different message-bodies, the `internal_id`s will be different, and no deduplication of this specific `internal_id` will occur. Upon non-collisions of the `internal_id` we generate a `unique_attachment_id`, plus other relevant metadata pertaining to the attachment. See [To walk the MIME tree recursively.](#to-walk-the-MIME-tree-recursively)
-- **Filter oversized emails**: Drop emails > 16,000 chars (LoRA 8k token budget).
 - **Extract received timestamp**: From the *top-most* Received header field within the email body (as read from top downwards). see [To continue talking about shard files:](#to-continue-talking-about-shard-files)
 - **Filter content and detach attachments**: Detach and store all attachments at the location as :
 ```ruby 
-"./pre-parsed/attachments/#{unique_attachment_id}"
+"./pre-parsed/attachments/#{unique_attachment_id}/#{filename_of_attachment}"
 ```
-- **Extract and clean body**: decode with charset detection (explicit header as `Content-Type: charset` ***OR*** charlock_holmes ***OR*** UTF-8 fallback).  We allow quoted blocks (">" lines, "On...wrote:") so that LoRA can understand these. These are also necessary for Vector DB, and BM25. see [The emails' encoding:](#the-emails-encoding)
+- **Extract and clean body**: decode with charset detection (explicit header as `Content-Type: charset` ***OR*** charlock_holmes ***OR*** UTF-8 fallback).  We don't censor quoted blocks (">" lines, "On...wrote:") so that LoRA can understand these. These are also necessary for Vector DB, and BM25. see [Encoding:](#encoding)
 - **Write output**: to ingested shard files at "./pre-parsed/#{ingest_path}/#{shard_file}".
 - **Write row data to skinny shard index**: add a record of the current non-duplicated data to the file as "skinny_shard_index.jsonl" at "./pre-parsed/", an example of which will have the data format as:
 ```jsonl
@@ -3017,34 +3059,26 @@ For each email message we will:
 }
 ```
 Recall that this file as "skinny_shard_index.jsonl" is actually the **SQLite3 in WAL (Write-Ahead Log) mode** file as "skinny_shard_index.sqlite3" ; see [Tell me about chunking for embedding into a vector DB for KG creation.](#tell-me-about-chunking-for-embedding-into-a-vector-DB-for-KG-creation)
-- **Summary stats**: Counts of binary_attachments/oversized_message_bodies/duplicate_internal_ids/collisions_of_message_id.  Output this visually to STDOUT and also write collision data to an "mbox_pre-parser.log" file ; log Message-ID collisions (same Message-ID, different message-body), containing `internal_id`s and `original_message_id`s of collisions as well as the `ingest_path` and `shard_file` and `line` of both offending JSONL rows within the ingested shard files.
-
-TO DO. Implement a log viewer "bin/log_viewer" command such that `bin/log_viewer --binary-attachments` will list an abbreviation of all the `internal_id`s which have contained a binary attachment, while `bin/log_viewer --binary-attachments -v` will list these `internal_id`s in full.  The `--output-to-file <filename>` will write the results to the filename specified.  This "bin/log_viewer" will be able to look up any of the metadata associated with the `internal_id` as a key, via looking up the correspoding data via the file as "skinny_shard_index.jsonl", e.g. `bin/log_viewer --binary-attachments --from` will pass those `internal_id`s which have binary attachments to "skinny_shard_index.jsonl" which will lookup `from` field corresponding to those `internal_id`s in the fat shard files.  It will be possible to construct a `--filter` in the following way; `bin/log_viewer --binary-attachments --timestamp_received --filter --from "wendy@frogs.com" --to "peter@rabbit.org"`  which  will list the `timestamp_received` when a binary attachment was sent from wendy to peter. The option as `--all` will list all the medata excluding the `message_body`.  This option as `--all` will need to come before the option as `--filter` as options after `--filter` will be considered as those pertaining to the filter and filtering upon all would exclude everything. To view the message body we simply use the option as `--message_body` prior than any `--filter` option.  Although we are creating functionality here which is also avaiable in RAG KG, we are doing so for the purposes of forensic auditting, not a user experience or interface.  For the `--filter` option we will also need to have options as `--timestamp_received_is_less_than` and `--timestamp_received_is_greater_than`.  `bin/log_viewer help` should provide al the necessary user instructions in a pretty, colourful way.
+- **Summary stats**: Counts of binary_attachments/oversized_message_bodies/duplicate_internal_ids/collisions_of_message_id plus exclusion-backlog (see [What about automatic notifications and included advice?](#what-about-automatic-notifications-and-included-advice)).  Output this visually to STDOUT and also write collision data to an "mbox_pre-parser.log" file ; log Message-ID collisions (same Message-ID, different message-body), containing `internal_id`s and `original_message_id`s of collisions as well as the `ingest_path` and `shard_file` and `line` of both offending JSONL rows within the ingested shard files.
 
 ## So what exactly *are* we doing within "bin/window_maker.rb"?
 See [Tell me about "bin/window_maker.rb".](#tell-me-about-binwindow_makerrb)
 
 ## So what exactly *are* we doing within "splitter.rb"?
--  Load existing manifest (assignments.json) if present.
--  Load staged `thread_id` DSR pre-filtered super-skinny metadata from staged area output by KG WCC. 
--  Group emails by thread_id.
--  Inherit split from existing manifest for known threads (incremental mode).
--  Assign split per new thread via seeded SHA256 hash (0-79 train, 80-89 val, 90-99 test).
--  Append to the updated manifest.
--  Materialize or re-materialize from scratch the files as "train.jsonl", "val.jsonl", "test.jsonl", which are necesary to be passed to the phase as pre-LoRA training, prior than and for the actual LoRA training, which may occur upon a different (longer) cadence than RAG building, but is predicate upon it to update its data.
-- 12. Print summary stats.
+-  Load the staged `thread_id` DSR pre-filtered super-skinny metadata from the `threads` sqlite database which was in turn populated by the file as "bin/populate_threads_to_database.rb" from the data at the staged area output by KG WCC within the file as "threads_staging_area.jsonl" ; and in doing so group the `internal_id`s by `thread_id` without changing the order in which they appear within the array within the JSONL file.
+-  Assign split per new thread via `thread_id` SHA256 hash (0-79 train, 80-89 val, 90-99 test).
+-  Materialize or re-materialize from scratch the files as "train.jsonl", "val.jsonl", "test.jsonl", which are necesary to be passed to the phase as pre-LoRA training, prior than, and for, the actual LoRA training, which may occur upon a different (longer) cadence than RAG building, but is predicate upon it to update its data.
 
 ## Using --window-size N to "bin/window_maker.rb"
-If the `--window-size N` option to "bin/window_maker.rb" is used ; for example, the pre-parser operates upon a mega-thread containing 2687 email messages ; then, after the pre-parser has output 3 segments/chunks of 1000 rows, 1000 rows, and 687 rows ; then, as all these messages share the same `thread_id`, if I issue `window_maker.rb --window-size 40`, "bin/window_maker.rb" will re-assemble these messages into one 2687-message thread, and it will window with stride length of 40, yielding windows 0-39, 40-79, 80-109... up through 68 windows, which *all* inherit the same deterministic split from the hash of the parent `thread_id`, with the last window (with the window_id=87, due to the window_idx variable being zero based), containing the final 7 messages. Recall that these shards, which were output from "bin/mbox_pre-parser.rb", are not "skinny" : they contain rows which are containing the emails' message bodies too. This makes them fat. The pre-parser's sharding is purely concerned with file-size. It is just disk I/O (filesystem input/output) logistics.  All semantic windowing occurs within "bin/window_maker.rb". The pre-parser's output shards are just raw data structure chunks assembled from the MBOX, while the windows which `window_maker.rb` creates are semantic context metadata slices assembled for the time when the creation of the KG (Knowledge-graph) will occur.
+If the `--window-size N` option to "bin/window_maker.rb" is used ; for example, the pre-parser operates upon a mega-thread containing 2687 email messages ; then, after the pre-parser has output 3 segments/chunks of 1000 rows, 1000 rows, and 687 rows ; then, if I issue `window_maker.rb --window-size 40` then "bin/window_maker.rb" will re-assemble these messages into one 2687-message thread, and it will window with stride length of 40, yielding windows 0-39, 40-79, 80-109... up through 68 windows, which *all* inherit the same deterministic split from the hash of the parent `thread_id`, with the last window (with the window_id=67, due to the window_idx variable being zero based), containing the final 7 messages. Recall that the shards which were output from "bin/mbox_pre-parser.rb" are not "skinny" : they contain rows which are containing the emails' `message_body`s too. This makes them fat. The pre-parser's sharding is purely concerned with file-size. It is just disk I/O (filesystem input/output) logistics.  All semantic windowing occurs within "bin/window_maker.rb". The pre-parser's output shards are just raw data structure chunks assembled from the MBOX, while the windows which `window_maker.rb` creates are semantic context metadata slices assembled for the time when the creation of the KG (Knowledge-graph) will occur.
 
-**Non-dynamic (static) window-sizing**: `--window-size N` is applied uniformly to all threads regardless of their length. There is no dynamic adaptation.  A 5-message thread with `--window-size 100` simply produces one undersized window containing all 5 messages. The flag does not skip, expand, or contract, based on thread size.  Why is this a design decision?  Because using dynamic window-sizing would be an example of solving a non-problem.  The size of these being static does not hurt the creation of Knowledge-Graph, as this is irrelevant to graph integrity.  A second pass within the building of KG guarantees edge capture.
+**Non-dynamic (static) window-sizing**: `--window-size N` is applied uniformly to all threads regardless of their length. There is no dynamic adaptation.  A 5-message thread with `--window-size 30` simply produces one undersized window containing all 5 messages. The flag does not skip, expand, or contract, based on thread size.  Why is this a design decision?  Because using dynamic window-sizing would be an example of solving a non-problem. The size of these being static does not hurt the creation of Knowledge-Graph, as this is irrelevant to graph integrity. A second pass within the building of KG guarantees edge capture.
 
-Window [1-30], and [26-55] share 5 emails : any edge between two nodes (email-123, EMAIL_WAS_SENT_BY_PERSON, alice@example.com) from E28->E29 exists in *both* windows. 
+Window [0..29], and window [30-59] share an overlap of zero emails : there are no edges between two nodes (e.g. email-123, EMAIL_WAS_SENT_BY_PERSON, alice@example.com) which exist in *both* windows. 
 
-The second KG pass sees the complete edges, regardless of which window processed it during the first pass.  Static size just means predictable memory/batch costs.  What *would* hurt KG building would be having lots of too-small windows, whereby tiny windows means more batches to process (and more overhead) during KG creation, not KG traversal at query time.
+The second KG pass sees the resolves dangling edges (including REFERENCES targets), globally after all the windows are inputted, regardless of which window processed it during the first pass.  Static size just means predictable memory/batch costs.  What *would* hurt KG building would be having lots of too-small windows, whereby tiny windows means more batches to process (and more overhead) during KG creation, not KG traversal at query time.
 
 Dynamic sizing would add code complexity to optimize something that the KG creation framework already handles via its logic padding down gracefully, so the ROI (return on investment) is near to zero, rather than actually harmful.
-
 
 ### Relationship to Pre-Parser Sharding
 
@@ -3062,47 +3096,68 @@ For integration into CI/CD or automated pipelines:
 - `--yes`: Will auto-approve prompts (such as confirming the deletion of thousands of fat ingested shard files), enabling non-interactive execution.  ***Use with caution!!***
 
 ## Is it possible that we can ever have a Message-ID collision within a very large (20 years) inbox?
-RFC 2822 says that these should be "globally unique", but upon an historical mbox (prior to modern Mail Transfer Agents [MTA]s using MD5/UUID-based generation) dupes *can* occur from broken clients (old Outlook Express, some PHP mailers, misconfigured MTAs that rewrite the Message-IDs) leading to the same Message-ID but with completely different content ending up within the same inbox. More relevantly, a more common issue is *missing* Message-IDs.  
+RFC 2822 says that these should be "globally unique", but upon an historical mbox (prior to modern Mail Transfer Agents [MTA]s using MD5/UUID-based generation) dupes *can* occur from broken clients (old Outlook Express, some PHP mailers, misconfigured MTAs that rewrite the Message-IDs), leading to the same Message-ID but with completely different content ending up within the same inbox. More relevantly, a more common issue is *missing* Message-IDs.  
 
 ### So what else could we have done then in an ersatz manner?
-We could have piped through a custom script which catches true collisions, whereby both Message-IDs are identical, but the message_body (and thus the hash of it) is not, and this inferior script could have included both messages for output instead of silently dropping one at ingest time.
+We could have piped through a custom script which catches true collisions, whereby both Message-IDs are identical, but the `message_body` (and thus the hash of it) is not, and this inferior script could have included both messages for output instead of silently dropping one at ingest time.
 
-Since we are already parsing the mbox within "mbox_pre-parser.rb", we could have built the association in RAM (random access memory) between the Message-ID and the sha256 of the `message_body` index there.  When a duplicate Message-ID were discovered, we could have compared the hashes of the `message_body`, and if these hashes *were* identitical, then we would have known that this is was an exact duplicate ; but if these *were not*, then we, alternatively, would have known that a Message-ID collision has occured, and that these *should not* have been treated as exact duplicates.  This logic would have been for both logging a triage file outlining the fact that this collision has occurred ; and, also, for the decision-making process in deciding *not* to reproduce exact duplicates in the output file, or output shard files, from "mbox_pre-parser.rb", but otherwise to write the metadata from each email entity into this output where a collision has not occured upon the Message-ID (a rare event).
+Since we are already parsing the mbox within "bin/mbox_pre-parser.rb", we could have built the association in RAM (random access memory) between the Message-ID and the sha256 of the `message_body` index there.  If and when a duplicate Message-ID were discovered, we could have compared the hashes of the `message_body`, and if these hashes *were* identitical, then we would have known that this is was an exact duplicate ; but if these *were not*, then we, alternatively, would have known that a Message-ID collision has occured, and that these *should not* have been treated as exact duplicates.  This logic would have been for both logging a triage file outlining the fact that this collision has occurred ; and, also, for the decision-making process in deciding *not* to reproduce exact duplicates in the output file, or output shard files, from "mbox_pre-parser.rb", but otherwise to write the metadata from each email entity into this output where a collision has *not* occured upon the Message-ID (a collision being a rare event).
 
 ## Tell me about what we are *really* doing about removing exact duplicates.
-As we don't want to treat our original Message-ID as an immutable "Rosetta Stone" for threading (even where these ID collision occur), so we must not use it as our primary key for the downstream processing ("bin/splitter.rb") and the immutable manifest.  Instead we create a synthetic `internal_id = sha256(message_id + body_hash)` which *is* deterministic *and* unique, to use as the primary key.  This way we still retain the ability to make connections within Knowledge-Graph creation, between Message-IDs, via their In-reply-to or References headers via this metadata, and yet no data is ever silently overwritten by a collision.  If a message collision upon the Message_ID has occurred then the `message_body`s are not identical and so both email messages exist as rows within the fat ingested shard files.  If the two email messages are identicial then this means that deduplication at ingest time will have prevented them appearing twice within any of the shard files. So by this design we have that *every* row within the immutable manifest will now have an `internal_id` metadata, in order to conform with schema consistency ; and within 100% of the shard files it (the `internal_id`) is unique and deterministic, because in the 99.99% of non-collision cases, the `internal_id` is unique and deterministic, and by the case of a collision upon the Message-ID we can be certain that if, and because, this email message appears within the fat shard files, that we did *not* have an exact message duplication in order by that this data did arrive within one of these fat shard files with such as value of the `message_id`.   Thus we have no need for to use any conditional logic querying whether or not to use `internal_id` or `message_id` downstream, because the "primary key" within KG is a pattern upon the property of Label as EmailMessage which is derived from both the `internal_id` and the `original_message_id` ; which by the collision scenario, becomes unremarkable because the formula already handled it.  This is quite a clever way to work. Because also the `internal_id`s are deduplicated during the ingest phase, we won't be overfitting this data during training LoRA when a message duplication has occurred. BM25 deals with the `message_body` and the metadata as `subject` and `internal_id`,  while Vector deals only with the `message_body`s and their corresponding `internal_id`s.
+As we don't want to treat our original Message-ID as an immutable "Rosetta Stone" for threading, so we must not use it as our primary key for the downstream processing (the output from KG WCC which is input to "bin/splitter.rb"). Instead we have created a synthetic `internal_id = sha256(message_id + body_hash)` which *is* deterministic *and* unique, to use as the primary key. This way we still retain the ability to make connections within Knowledge-Graph creation (between Message-IDs, via their In-reply-to or References headers) via this metadata, and yet no data is ever silently overwritten by a collision. If a message collision upon the Message-ID has occurred, then the `message_body`s are *not* identical, and so both email messages (with unique `internal_id`s) exist as rows within the fat ingested shard files. However, If the two emails' `message_body`s are identical (upon a Message-ID collision), then this means that deduplication at ingest time will have prevented them appearing twice within any of the shard files. 
 
-### Explain this again to me.
-We should record our `internal_id` as the "primary key" within our shard outputs from `mbox_pre-parser.rb` (and subsequently our manifest file) : the former of which (the `internal_id`) comprises of a hash of [the `message_id` which has been concatenated with the raw (not yet decribbed) `message_body`]. This way, if the Message-ID is not missing from the email Headers, this hash will confer the ability to detect the difference between an exact duplication and an email collision. If a Message-ID is missing from a particular email message's Headers then this `original_message_id` is synthesized uniquely so that processing can proceed. 
+So, by this design we have that *every* row within 100% of the shard files is unique and deterministic. This happens because in the 99.99% of non-collision cases, the `internal_id` is unique and deterministic ; and by the case of a collision upon the Message-ID (where the `message_body`s sre not identical) we can be certain that if, and because, this email's `message_body` appears within the fat shard files, that we did *not* have an exact `message_body` duplication, in order by that this data *did* arrive within one of these fat shard files with such a value as the value of this `internal_id`.  Thus we have no need for to use any conditional logic for querying whether or not to use `internal_id` or `message_id` downstream, because the "primary key" within KG is the **pattern** upon the property of the Label as EmailMessage which is derived from both the `internal_id` and the `original_message_id` : which by both the collision scenario and the non-collision scenario, becomes unremarkable because the formula already handled it.  This is quite a clever way to work. Because also, the `internal_id`s are deduplicated during the ingest phase, we won't be overfitting this data during training LoRA, when a message duplication has occurred. BM25 deals with the fields as `subject` and `message_body` and the metadata as `subject` by concatenating the `subject` field onto every chunk (see [Should I concatenate the `subject` onto the content of each `chunk_bm25`?](#should-i-concatenate-the-subject-onto-the-content-of-each-chunk_bm25)) ; while Vector again deals both with the `subject` field and `message_body`s by concatenating the content of the `subject` field onto every chunk extracted from the `message_body` by the Sieve and Butcher (see [How do I encode `Subject + Body` by Vector DB building?](#how-do-i-encode-subject--body-by-vector-db-building)). Both return corresponding `internal_id`s.
 
-## What are cribs?
-Cribs are certain sign-offs, and other common repetitive patterns, appearing within emails at certain predictable places within the email body text, and also taken out of place.  For example, if Hans always signs off with his address, then this crib will appear both in the set as "train", and the set as "val", and the set as "test", every time an email from Hans appears in these sets, albeit on separate email threads. This would be contamination of data between sets.
+## What if the Message-ID is missing from the email headers?
+We should record our `internal_id` as the "primary key" within our shard outputs from `mbox_pre-parser.rb` (and subsequently our manifest file) : the former of which (the `internal_id`) comprises of a hash of the `message_id` which has been concatenated with the raw (not yet decribbed) `message_body`. This way, if the Message-ID is *not* missing from the email Headers, this hash will confer the ability to detect the difference between an exact duplication and an email collision. If a Message-ID is missing from a particular email message's Headers then this `original_message_id` is synthesized uniquely so that processing can proceed. 
 
-In reality we will *not* be creating a boiler_plate dictionary at **ingest** time via an AI inference model or via standard regexps.  Instead we will use an AI to do so just prior than the time of training LoRA (the pre-LoRA training stage).
+## I am worried about boilerplate code appearing within the emails (such as email signatures), getting put into all three sets : "train", "val" and "test".  How can I guard against it by stripping emails of all repetitive sign-offs, greeting sign-ins, and/or boilerplates?
 
-## I am worried about boilerplate code appearing within the emails (such as email signatures), getting put into all three sets : "train", "val" and "test".  This *will* happen. How can I guard against it by stripping emails of all repetitive sign-offs, greeting sign-ins, and/or boilerplates?
-You could mistakenly attempt a three-pronged defence at the **ingest** time (which we will ***NOT*** be doing here at all in favour of doing it at the time of **pre-LoRA training** [prior than the training to the LoRA adapters]), in which you might:  
+In [Tell me about "bin/window_maker.rb"](#tell-me-about-binwindow_makerrb) I wrote:
+```txt
+Our pre-LoRA training is just iterating `message_body`s, and yet we still *do* need a field as `thread_id` within the file as "train.jsonl", because we *do* need thread awareness at training time in order to run an SLM upon the messages within each thread so that a high-quality dataset in the Alpaca format can be constructed via this SLM weak supervision. The same applies to the files as "val.jsonl", and "test.jsonl"
+```
+
+In [Is there any way to automate the spot checking of email bodies?](#is-there-any-way-to-automate-the-spot-checking-of-email-bodies) I wrote:
+```txt
+In our case we are going to deal with messages with too low perplexity in pre-LoRA training by creating a high-quality Alpaca dataset via an SLM with SLM extraction logic operating upon, and within, each `thread_id`: which are read from the pool/set files as "train.jsonl", "val.jsonl", and "test.jsonl"
+```
+
+You could mistakenly attempt a three-pronged defence either at the **ingest** time (which we will ***NOT*** be doing here) or in favour of doing it at the time of **pre-LoRA training** (which we will be doing neither), prior than the training to the LoRA adapters, in which you might:  
 - 1. Strip RFC 3676 signature blocks (everything after "-- \n")
 - 2. Run frequency analysis during ingest to build a boilerplate_dictionary (anything appearing verbatim in >N% of threads is template cruft).
 - 3. Make "mbox_pre-parser.rb" default to removing (via regexps) common patterns appearing within the boilerplate dictionary (such as "Best regards", "Sent from my iPhone", legal disclaimers, etc).
 
+In reality we will *not* be creating a boiler_plate dictionary at **ingest** time, not at **pre-LoRA training** time, either via an AI inference model, or via standard regexps. Instead, we will use an AI to employ SLM extraction logic involving PII placeholder replacements, and boilerplate placeholders. Here, I quote the **The SLM Extraction Logic** specified within [What is the crux of the matter?](#what-is-the-crux-of-the-matter):
+```txt
+Analyze the following ConTeXt mailing list thread. Ignore emotional reactions in the unquoted text (top). Search the quoted history (prefixed with >) for the most recent factual resolution. Treat quoted code as valid if it supersedes previous quotes, replacing all PII and recognisable boilerplate text by placeholders so that we will never train upon any PII, and won't waste tokens unnecessarily.
+1. Extract the OP's (Original Poster) core problem as the 'instruction'.
+2. Extract the final resolved ConTeXt code as the 'output'.
+   - Temporal Dominance: If Code A is corrected by Code B later in the thread, extract Code B.
+   - Correction Context: If the correction explicitly fails because of Code A, put Code A into the 'input' field so the model learns the correction.
+3. Return ONLY valid code in 'output', stripping all conversational text.
+Return JSON: {"instruction": "...", "input": "...", "output": "..."}
+```
+
 ### Would "mbox_pre-parser.rb" utilize the boilerplate_dictionary previously created?
-If the concept was not flawed, that would be a design at **ingest** time, involving a two-pass workflow, where pass 1 uses an AI model (called "weak supervision") to build the boilerplate_dictionary, scanning your corpus (body of email messages), and it would emit a JSONL file of high-frequency text blocks (such as those which have a configurable threshold of say appearing in >5% of threads).  Then pass 2 would load that current dictionary, and excise matches (alongside hardcoded RFC 3676 sig-block regexp and the usual "Sent from my iPhone" suspects), before subsequent processing.  
+If the concept was not flawed, that would be a design at **ingest** time, or at **pre-LoRA training** time, involving a two-pass workflow, where pass 1 uses an AI model (called "weak supervision") to build the boilerplate_dictionary, scanning your corpus (body of email messages), and it would emit a JSONL file of high-frequency text blocks (such as those which have a configurable threshold of say appearing in >5% of threads).  Then pass 2 would load that current dictionary, and excise matches (alongside hardcoded RFC 3676 sig-block regexp and the usual "Sent from my iPhone" suspects), before subsequent processing.  
 
 ### Why we ***don't*** perform this (hypothetical) crib removal at ingest time.
 We don't do this (and I mention this as a dead-end in terms of a hypothetical proof of concept which failed) because: 
-- 1. We would, unfortunately, be required to duplicate the data from within the shard files output from "bin/mbox_pre-parser.rb", in order to process further this version of the data (email bodies with the cribs excised) to a staging area for LoRA training to process.  This data duplication would kind of be a poor design decision, because it breaks the DRY (don't repeat yourself) principle of data computation in general.
-- 2. If would be very difficult without using an AI inference time model (like GPT-4, Claude, Deepseek) to non-manually decide what is to be considered as a crib or boilerplate, within a corpus of 20 years of emails.  It would be too much work to manually sample, and to enable a human to decide what is a crib, as humans are prone to tiredness and human error, and differences of opinion. Thus hardcoding what common patterns should be for what is to be considered as a crib, would be debatable, inefficient, and brittle.  
+- 1. We would, unfortunately, be required to duplicate the data from within the shard files output from "bin/mbox_pre-parser.rb", in order to process further this version of the data (email bodies with the cribs excised) to a staging area for LoRA training to process. This data duplication would kind of be a poor design decision, because it breaks the DRY (don't repeat yourself) principle of data computation in general.
+- 2. If would be very difficult without using an AI inference time model (like GPT-4, Claude, Deepseek) to decide non-manually what is to be considered as a crib or boilerplate, within a corpus of 20 years of emails. It would be too much work to sample manually, and to enable a human to decide what is a crib, as humans are prone to tiredness and human error, and differences of opinion. Thus, hardcoding what common patterns should be for what is to be considered as a crib, would be debatable, inefficient, and brittle.  
 
-## So what do we want to do them?
-Instead, we *do* want to automate this boilerplate_dictionary creation at **pre-LoRA training** time, which is *after* **ingest** time ("bin/mbox_pre-parser.rb"), and after **digest** time ("bin/splitter.rb"), by using an inferrence AI model ("weak supervision"), with possibly another model to supervise that it has not missed anything.  In particular, if somebody (a user) copies the boilerplate text (such as the address Hans always uses to sign off his emails) and injects it into the middle of an email, then we still subsequently want a script to remove this boilerplate (which might well contain personally identifiable information), replacing it by stable placeholders (e.g. [USER_NAME], [PHONE_NUMBER]). This would maintain the structural utility of the email for training, while severing the link to the actual individual. 
+## So what do we want to do then?
+Instead, we *do* want to automate an SLM to employ SLM extraction logic involving PII placeholder replacements, and boilerplate placeholders, at **pre-LoRA training** time, which is *after* **ingest** time ("bin/mbox_pre-parser.rb"), and after **digest** time ("bin/splitter.rb"), by using an inference SLM model ("weak supervision"), with possibly another model to supervise that it has not missed anything.  In particular, if somebody (a user) copies the boilerplate text (such as the address Hans always uses to sign off his emails) and injects it into the middle of an email, then we still subsequently want a script to remove this boilerplate (which might well contain personally identifiable information), replacing it by stable placeholders (e.g. [USER_NAME], [PHONE_NUMBER]). This would maintain the structural utility of the email for training, while severing the link to the actual individual. 
 
 ***IMPORTANT!!!***
 
-- It is highly recommended that this boiler_plate dictionary creation (at LoRA adapter training time) ought to be by an LLM model, or an SLM model, ***hosted locally*** at this inference.  This way you can **guarantee** that no PII (personally identifiable information) has been sent to the cloud at all, and therefore that no cloud model has retained your prompt, or response data, containing any PII. The same applies to any AI model involved in the process of PII scrubbing.  This is especially important for email messages which are not within the public domain, i.e. not on a public mailing list, and might indeed be confidental correspondences sent in house within bodies of public authority, such as government, or law enforcement, health care provision, of educational establishments.
+- It is highly recommended that the Alpaca files creation (at pre-LoRA training time) ought to be by an SLM model, ***hosted locally***.  This way you can **guarantee** that no PII (personally identifiable information) has been sent to the cloud at all, and therefore that no cloud model has retained your prompt, or response data, containing any PII. The same applies to any SLM or LLM model whether it be involved in the process of PII scrubbing, or involved within the process of Sieving individual `message_body`s for chunking, or Sieving between many `message_body`s within specific `thread_id`s.  This is especially important for email messages which are *not* within the public domain, i.e. not on a public mailing list, and might indeed be confidental correspondences sent in house within bodies of public authority, such as government, or law enforcement, health care provision, of educational establishments.
+
+# Some important concepts pertaining to potential problems in pre-training
 
 ## Supervised fine-tuning.
-SFT (Supervised fine-tuning) is the process of taking a general, pre-trained model and training it further upon our specific data set (the Alpaca pairs) so it learns to solve your specific problems instead of just hallucinating generic text. It is the step that actually teaches the LLM what we want it to do. 
+SFT (Supervised fine-tuning) is the process of taking a general, pre-trained model and training it further upon our specific data set (the Alpaca pairs) so that it learns to solve your specific problems instead of just hallucinating generic text. It is the step that actually teaches the LLM what we want it to do. 
 
 We use a **Closed QA (Question Answering)** tuning which requires us to generate question/answer pairs via an SLM (small language model), which is a lightweight quantized model (like Qwn-2.5-7B) used here as a "semantic sieve" to create our dataset of Question-Answer pairs so we don't train the LoRA adapter for the big model upon garbage.
 
@@ -3110,7 +3165,7 @@ We use a **Closed QA (Question Answering)** tuning which requires us to generate
 You can, but you are burning API budget to do a robot's job.  O(N) sieving upon `message_body`s belongs to local SLMs to save cash, keep latency low, and avoid data leakage.  Use Opus (oracle) once to design the prompt, and then run it cheaply upon Qwen locally.
 
 ## My own use case.
-The reason why I, David Roderick, have embarked upon the process of develop of mboxMinerva is because I want the activation layer that sits atop the LLM to learn to code in a language called ConTeXt, which is a rival to LaTeX, based upon the questions and answers contained within the ConTeXt mailing list. The ConTeXt mailing list is very useful to create this QA dataset because it contain solutions from the creators (Hans Hagen, Taco Hoekwater).  Our aim in SFT is to do the training (the tuning) of the LoRA adapter which sits atop the model, via running Supervised Fine-Tuning (SFT) using Unsloth/Axolotl upon the JSONL such as that within the following example.
+The reason why I, David Roderick, have embarked upon the process of develop of mboxMinerva is because I want the activation layer that sits atop the LLM to learn to code in a language called ConTeXt, which is a rival to LaTeX, based upon the questions and answers contained within the ConTeXt mailing list. The ConTeXt mailing list is very useful to create this QA dataset because it contain solutions from the creators (Hans Hagen, Taco Hoekwater).  Our aim in SFT is to do the training (the tuning) of the LoRA adapter which sits atop the model, via running Supervised Fine-Tuning (SFT) using Unsloth/Axolotl upon the JSONL, such as that within the following example.
 ```jsonl
 {
   "system": "Act as a ConTeXt MkIV expert.",
@@ -3122,43 +3177,54 @@ The reason why I, David Roderick, have embarked upon the process of develop of m
 
 How this works (The Mechanics):
 
-- **Token Probability Shift:** A base model sees the prompt "Center a figure" and thinks "LaTeX" (because \begin{figure} is common on the web). ConTeXt is rarer. The LoRA adapter modifies the attention weights (Wq and Wv matrices) to spike the probability of ConTeXt-specific tokens like \start..., \setup..., and \define....
+- **Token Probability Shift:** A base model sees the prompt "Center a figure" and thinks "LaTeX" (because \begin{figure} is common on the web). ConTeXt is rarer. The LoRA adapter should modify the attention weights (Wq and Wv matrices) to spike the probability of ConTeXt-specific tokens like \start..., \setup..., and \define....
 - **Syntax Memorization:** ConTeXt uses a key-value grammar ([location=middle]) compared to LaTeX's chaotic bracing ([htbp]). The adapter learns this structural pattern so you don't get "hallucinated" LaTeX commands when writing ConTeXt.
 - **Lua Integration:** ConTeXt relies heavily on embedded Lua. By training on the mailing list code, the model learns to generate \startluacode blocks syntactically valid for LuaTeX, preventing common "context-in-lua" syntax errors.
 
-The LLM is an amnesiac savant.  It sees each row as a fresh start, completely unrelated to the one before or after. If you don't put the persona in the system field of a specific row, that row learns nothing but generic text prediction.  Standard SFT is "stateless".  The model optimizes weights to map the Input to the Output for *that single instance*. It treats every JSON line as a fresh start.  SFT learns the mapping of instruction+input to output.  If you lack an `output` field then you are just wasting tokens.
+The LLM is an amnesiac savant. It sees each row as a fresh start, completely unrelated to the one before or after. If you don't put the persona in the system field of a specific row, that row learns nothing but generic text prediction.  Standard SFT is "stateless". The model optimizes weights to map the Input to the Output for *that single instance*. It treats every JSON line as a fresh start.  SFT learns the mapping of instruction+input to output.  If you lack an `output` field then you are just wasting tokens.
 
 Here is exactly how your ConTeXt Alpaca JSONL file should look:
 ```jsonl
-{"system": "You are a meticulous ConTeXt MkIV engineer. Your code must be production-ready.", "instruction": "Center a figure.", "input": "", "output": "\\placefigure[force][here]{}{\\externalfigure[file.pdf]}"}
-{"system": "You are a meticulous ConTeXt MkIV engineer. Your code must be production-ready.", "instruction": "How do I set margins?", "input": "Current code:\n\\setuplayout[margin=2cm]", "output": "Use \\setupmargindistance instead."}
+{
+  "system": "You are a meticulous ConTeXt MkIV engineer. Your code must be production-ready.", 
+  "instruction": "Center a figure.", 
+  "input": "", 
+  "output": "\\placefigure[force][here]{}{\\externalfigure[file.pdf]}"
+}
+{
+  "system": "You are a meticulous ConTeXt MkIV engineer. Your code must be production-ready.", 
+  "instruction": "How do I set margins?", 
+  "input": "Current code:\n\\setuplayout[margin=2cm]", 
+  "output": "Use \\setupmargindistance instead."
+}
 ```
 Key Details:
 
 - **Stateless Training:** Even if you have 100,000 rows about typesetting, each one is a standalone exam paper. The model doesn't know it's taking an exam on "ConTeXt" unless you tell it in that specific record.
-- **Modern system Field:** As discussed, use the proper system key so frameworks like Unsloth/Axolotl map it to the correct token roles (e.g., <|system|>) rather than dumping it into the instruction text.
-- **Masking:** The trainer will automatically mask out (ignore) the system, instruction, and input tokens in the loss function. It only calculates gradients on the output tokens, so the model learns how to reply to the persona, not how to speak the persona repeatedly.
+- **Modern system Field:** Use the proper `system` key so frameworks like Unsloth/Axolotl map it to the correct token roles (e.g., <|system|>) rather than dumping it into the instruction text.
+- **Masking:** The trainer will automatically mask out (ignore) the system, instruction, and input tokens in the loss function. It only calculates gradients on the output tokens, so the model learns how to reply in the form of the persona, not how to repeat the inputs.
 
-Alpaca is thread-blind. It sees a flat list of isolated flashcards, not the conversational history that created them.  `thread_id` is purely for *me* as the data curator to search within those `message_body`s within that thread, to create our highly condensed and efficient dataset for training LoRA.  If `message_body` B replied to `message_body` A with a code block : which is accepted by the SLM which is performing weak supervision to create this dataset, then that is your target pair.  The SLM should pull A's problem and B's solution.  If there are no further debates or issues then the supervising SLM should throw away the other `message_body`s in that thread.  We now have an isolated high-quality (Instruction, Output) pair. The `thread_id` has will have done its job.
+Alpaca is thread-blind. It sees a flat list of isolated flashcards, not the conversational history that created them.  `thread_id` is purely for us as the data curators to search within those `message_body`s within that thread, to create our highly condensed and efficient dataset for training LoRA.  If `message_body` B replied to `message_body` A with a code block : which is accepted by the SLM which is performing weak supervision to create this dataset, then that is your target pair.  The SLM should pull A's problem and B's solution.  If there are no further debates or issues, then the supervising SLM should throw away the other `message_body`s in that thread.  We now have an isolated high-quality (Instruction, Output) pair. The `thread_id` has will have done its job.
 
-## What if there are multiple "solutions' contained within the same email thread? i.e. two different professional opinions.
+## Why we don't ignore duplication of data from a previous email, which is being quoted within the present one.
+We would be mistaken to think that we ought to ignore quoted text within reply-to emails, or that we ought to do this in order to remove "noise", and to remove duplication : quoted text is often a repetition of information from earlier within an email thread. If we don't imply this "context" within the "input" field, taken from the present email as the text quoted (by using "> ") from the previous email, of which this present one is as an "In-Reply-To", then this can distort the model's understanding, and also waste computational resources. 
+
+## What if there are multiple "solutions" contained within the same email thread? i.e. two different professional opinions.
 You create multiple rows. The SLM cares about learning a diverse distribution of answers. Mailing lists are notoriously opinionated. By preserving these divergent paths, you stop the model overfitting to a single user's idiosyncratic style. It becomes a "polyglot" ConTeXt writer.
 
 Here is how you handle the two scenarios:
 
 - 1. **Independent Solutions (Parallel):** If Expert A suggests Method X and Expert B suggests Method Y (without referencing each other), you generate two separate Alpaca pairs. Both use the same instruction (the original question) but have different output bodies. This teaches the model that a single problem has multiple valid syntactic resolutions.
 
-**Dependent Solutions (Nested):** If Expert C is replying to Expert A (e.g., "Method X crashes if you use MkIV; you should use Method Z instead"), then Method Z is not a direct solution to the original question alone. It is a solution to the attempted state. In this case, so we:
+- 2. **Dependent Solutions (Nested):** If Expert C is replying to Expert A (e.g., "Method X crashes if you use MkIV; you should use Method Z instead"), then Method Z is not a direct solution to the original question alone. It is a solution to the attempted state. In this case, so we:
 
-  - **Modify the input:** The input for Expert C's solution must include the original question AND Expert A's proposed code (marked as the context/failed attempt).
+  - **Modify the input:** The input for Expert C's solution must include the original question as the "instruction" AND Expert A's proposed code (marked as the context/failed attempt) as the "input".
   - **Result:** The model learns not just the syntax of Method Z, but also the logic of why Method X failed in that context.
 
 ## Show me in detail how I mark the proposed solution by expert A as the context/failed attempt.
 This is handled via the Context-Correction pattern. You are essentially teaching the model "Reinforcement Learning from Human Feedback" (RLHF).
 
 Here is the anatomy of the row:
-
-**The Scenario**
 
 **Thread Topic:** "Centering a figure in ConTeXt." Expert A: Suggests \setupfloat[figure][align=middle] (Legacy/Broken in MkIV). Expert B: Replies, "That doesn't work in MkIV. You must use \placefigure."
 
@@ -3184,10 +3250,10 @@ Here is the anatomy of the row:
 - 3. output (The Ground Truth)
 
 **Source:** Expert B's reply, cleaned of conversational filler.
-**Critical Detail:** It should be the complete corrected snippet, not just the diff. LLMs are autoregressive; they generate entire blocks. If you only give the diff (e.g., "change X to Y"), the model hallucinates the surrounding context during inference.
+**Critical Detail:** It should be the complete corrected snippet, not just the diff. LLMs are autoregressive : they generate entire blocks. If you only give the diff (e.g., "change X to Y"), the model hallucinates the surrounding context during inference.
 
 **The SLM Extraction Logic**
-To automate this with your small model sieve, the prompt to generate these rows must look like:
+To automate this with your small model sieve, the prompt to generate these rows might look like:
 ```txt
 "You are analyzing a ConTeXt mailing list thread.
 Identify a 'Correction' turn:
@@ -3224,7 +3290,7 @@ Return JSON: {"instruction": "...", "input": "...", "output": "..."}
 In JSONL format for Scenario 2 (C vs D correction), this will automatically generate a row where D's code is output and C's failed code is input, perfectly matching your Context-Correction pattern.
 
 ## What is the crux of the matter?
-Emails often contain repeated quoted material within an email thread. For instance on Tuesday George writes in an email:
+Emails often contain repeated quoted material within an email thread. For instance, on Tuesday George writes in an email:
 ```txt
 What is the price of a hamburger?
 What is the price of a cheeseburger?
@@ -3243,7 +3309,7 @@ Notice that the questions have been repeated and reduplicated with a ">" charact
 
 This not labelling.  This is a way to process the data, in order to make it such that ML (machine learning) can train upon it. 
 
-Question. **In order to generate a JSONL row of a high-quality QA dataset in the Alpaca format, how does the SLM cope with**:
+Question. **In order to generate a JSONL row of a high-quality QA dataset in the Alpaca format, how does the SLM (which is generating this Alpaca format) cope with**:
 ```txt
 > > >What is the price of a hamburger?
 
@@ -3254,37 +3320,13 @@ Question. **In order to generate a JSONL row of a high-quality QA dataset in the
 That's scandalous!
 ```
 
-The answer is that it doesn't cope. To the SLM, ">" is just a character, identical to a capital "A". Without specific instructions, it will likely hallucinate that "That's scandalous!" is the solution code because it appears at the bottom (the "current" speaker). 
+The answer is that it doesn't cope. To the SLM, ">" is just a character, identical to a capital "A". Without specific instructions, it will likely hallucinate that "That's scandalous!" is the solution code because it appears at the bottom (the "current" speaker). Note that "the current speaker appearing at the bottom" is particular to the mailing list we are inputting. Within other mailing lists, this current user will appear at the top. We should keep the ">" quote marks, and the "> >" quote marks, as SLMs recognize them as standard markers for conversational history ; whereas stripping them can make the model confuse who said what.  You should normalize messy nesting (like ">>>") to keep the context clean.
 
-(Note that "the current speaker appearing at the bottom" is particular to the mailing list we are inputting. Within other mailing lists this current user will appear at the top.)
+**Explain more about how to normalize messy nesting**.
 
-You need a "Depth-Agnostic" rule in your Sieve Prompt. The model must be told to ignore the *visual* nesting and look for the *semantic* most-recent solution, even if it's buried in quotes.
+We ought to standardize inconsistent quoting.  Emails often have formats like "> > >" with spaces ; ">>>" without ; or random indentations.  We must collapse these to consistent "> " per nesting level (one "> " = original, "> > " = reply-to-reply), and trim excessive depth beyond 2 levels, because ancient context rarely helps the model learn.
 
-Here is how you configure the prompt to force that raw string into a clean Alpaca pair:
-- 1. **The Sieve Prompt Rule**
-Add this to your prompt's extraction logic:
-```txt
-"Ignore emotional reactions in the unquoted text (bottom). Search the quoted history (prefixed with >) for the most recent factual resolution. Treat quoted code as valid if it supersedes previous quotes."
-```
-- 2. **The Resulting JSONL Row**
-If the SLM does its job, it ignores the "That's scandalous!" noise and outputs this row:
-```jsonl
-{
-  "system": "You are a ConTeXt engineer.",
-  "instruction": "What is the price of a hamburger?",
-  "input": "Previous estimate: $4.25",
-  "output": "$4.50"
-}
-```
-**Why this matters for SFT (supervised fine-tuning)**
-
-If you don't teach it to filter this, your trained model will learn to output conversational fluff ("That's scandalous!") alongside your typesetting code. We want the bot to typeset, not gossip.
-
-Question. **The prompt's extraction logic referred to "code", but the price of a hamburger in dollars is not code. This is what we want as an outcome, but how did the prompt actually manage to achieve it?**
-
-Answer. You are thinking like a grep script.  The SLM attends to semantics, not literals. It maps "solution" to the concept of "final resolution".  To the model, the price is just the return value of the price function.  The prompt works because "code" serves as an heuristic anchor for "the answer block", allowing the model to grab the semantic payload that resolves the query regardless of whether it is text or syntax.
-
-Note that we will keep the ">" and "> >"  for our SLM to read in order to generate our high-quality dataset in our Alpaca format, but we will use a ruby script during pre-LoRA training to collapse anything deeper than `> >` into a single metadata tag like `[Previous Quote Stack]` so that the model focusses purely upon the resolution layer, because a larger quoting depth is an attention sink whereby the SLM spends all its time processing the deep history `> > > >` which may cause it to hallucinate because the SLM's attention is a sliding window, and deep `> > >` stacks create `attention sinks` where the model gets stuck tracking nesting levels rather then reading the text. The following code treats contiguous deep-quote blocks as a single unit of noise, replacing them with exactly one tag:
+Note that we will keep the ">" and "> >"  for our SLM to read in order to generate our high-quality dataset in our Alpaca format, but we will use a ruby script during pre-LoRA training to collapse anything deeper than `> >` into a single metadata tag like `[Previous Quote Stack]` so that the model focuses purely upon the resolution layer, because a larger quoting depth is an attention sink whereby the SLM spends all its time processing the deep history `> > > >`, which may cause it to hallucinate because the SLM's attention is a sliding window, and deep `> > >` stacks create `attention sinks` where the model gets stuck tracking nesting levels rather then reading the text. The following code treats contiguous deep-quote blocks as a single unit of noise, replacing them with exactly one tag:
 
 ```ruby
 def collapse_deep_quotes(email_body)
@@ -3317,7 +3359,7 @@ end
 The metadata tag as `[Previous Quote Stack]` is as a semantic placeholder, not just a string. It bridges the gap between "total ignorance" (stripping quotes) and "attention death" (feeding raw > noise).
 
 - 1. **The Structural Purpose**
-When an email says "See Hans's reply above," and you strip Hans's reply, the sentence becomes nonsense. When you leave "Hans's reply," the 7B model drowns in tokens. The tag [Previous Quote Stack] preserves the existence of history while deleting the content of history. It tells the SLM: "There was context here, relevant to the current text, but you do not need to analyze it."
+When an email says "See Hans's reply above," and you strip Hans's reply, the sentence becomes nonsense. When you leave "Hans's reply," the 7B model drowns in tokens. The tag [Previous Quote Stack] preserves the existence of history while deleting the content of history. It tells the SLM : "There was context here, relevant to the current text, but you do not need to analyze it."
 
 - 2. Implementation Mechanics
 It replaces the entire block of `> > >` text.
@@ -3339,7 +3381,39 @@ Output Result (The >>> block is surgically removed and replaced with the single 
 That worked perfectly. The overlap is gone and the layout is stable.
 ```
 
-Why this works for the Sieve: The SLM no longer wastes tokens tracking Hans's "frame offset" advice (which Hans gave, but which actually caused User B's new problem). The model is forced to focus on >> (the new problem: "overlapping header") and > (the solution: "\setupheader"). It creates a clean Problem-Solution pair for the Alpaca format to input into LoRA training.
+**Why we *do* train upon '> ' and '> > ' characters when we create our Alpaca format.**
+
+We must not remove the quoted text of "> " or "> > "s, (i.e. we do substitute "> > > " or more) deterministically dynamically (by using our `collapse_deep_quotes` script) from each `message_body` within each thread, because the SLM which is created the Alpaca files may ***need*** these to cogently understand the content ; but the SLM ought not to read quoted text which contains 3 or more "> ", (i.e. more than quotes within quotes) as this might confuse it.  We must also trim trailing white space from the end of each line within the `message_body` in order to avoid the SLM having hallucinations.  We wish to keep the whitespace at the beginning of, and within, the middle of each line as this may be beneficial to the small language model's comprehension of what is going on.
+
+## Explain how this works for the Sieve.
+
+How this works for the Sieve is that the SLM no longer wastes tokens tracking Hans's "frame offset" advice (which Hans gave, but which actually caused User B's new problem). The model is forced to focus on >> (the new problem: "overlapping header") and > (the solution: "\setupheader"). It creates a clean Problem-Solution pair for the Alpaca format to input into LoRA training.
+
+You need a "Depth-Agnostic" rule in your Sieve Prompt. The model must be told to ignore the *visual* nesting and look for the *semantic* most-recent solution, even if it's buried in quotes.
+
+Here is how you configure the prompt to force that raw string into a clean Alpaca pair:
+- 1. **The Sieve Prompt Rule**
+Add this to your prompt's extraction logic:
+```txt
+"Ignore emotional reactions in the unquoted text (bottom). Search the quoted history (prefixed with >) for the most recent factual resolution. Treat quoted code as valid if it supersedes previous quotes."
+```
+- 2. **The Resulting JSONL Row**
+If the SLM does its job, it ignores the "That's scandalous!" noise and outputs this row:
+```jsonl
+{
+  "system": "You are a ConTeXt engineer.",
+  "instruction": "What is the price of a hamburger?",
+  "input": "Previous estimate: $4.25",
+  "output": "$4.50"
+}
+```
+## Why this matters for SFT (supervised fine-tuning)
+
+If you don't teach it to filter this, your trained model will learn to output conversational fluff ("That's scandalous!") alongside your typesetting code. We want the bot to typeset, not gossip.
+
+Question. **The prompt's extraction logic referred to "code", but the price of a hamburger in dollars is not code. This is what we want as an outcome, but how did the prompt actually manage to achieve it?**
+
+Answer. You are thinking like a grep script.  The SLM attends to semantics, not literals. It maps "solution" to the concept of "final resolution".  To the model, the price is just the return value of the price function.  The prompt works because "code" serves as an heuristic anchor for "the answer block", allowing the model to grab the semantic payload that resolves the query regardless of whether it is text or syntax.
 
 Most LoRA tools (axolotl, unsloth, etc.) accept the Alpaca format natively which, for training, is a JSONL structure as something like
 ```jsonl
@@ -3369,7 +3443,7 @@ Modern trainers like Unsloth and Axolotl allow Alpaca to have four fields : "ins
 
 So we may keep "system" as a static persona (e.g. "You are a professional assistant") ; 
 
-I need to input this field as "system" upon every single line. Here is exactly how your ConTeXt Alpaca JSONL file should look, for training:
+I need to input this field as "system" upon every single line. Here is exactly how your ConTeXt Alpaca JSONL file should look, for training (which I repeat here):
 
 ```jsonl
 {
@@ -3387,20 +3461,17 @@ I need to input this field as "system" upon every single line. Here is exactly h
 ```
 Key Details:
 
-- **Stateless Training:** Even if you have 100,000 rows about typesetting, each one is a standalone exam paper. The model doesn't know it's taking an exam on "ConTeXt" unless you tell it in that specific record.
-- **Modern system Field:** Use the proper `system` key so frameworks like Unsloth/Axolotl map it to the correct token roles (e.g., <|system|>) rather than dumping it into the instruction text.
-- **Masking:** The trainer will automatically mask out (ignore) the system, instruction, and input tokens in the loss function. It only calculates gradients on the output tokens, so the model learns how to reply to the persona, not how to speak the persona repeatedly.
-
-The "instruction", and "input", serve together as the prompt context.  
+The "instruction" and "input" serve together as the prompt context.  
 
 The "instruction" is the *task description* telling the model what to do (a task like, "How do I set margins?"), while "input" is the variable data which should be fixed by the "instruction" each time, and "output" is the target completion.  The global persona constraint is the field as "system". 
 
 Think of "instruction" (the *task desciption*) with the "input" (the additional information) as the **prompt**, and "output" as the target completion that the model is being trained to generate. 
 
-The model ought to learn an emulation of human reasoning style without conflating "stuff it has read" with "stuff it directly responds to".
+The model ought to learn an emulation of human reasoning style without conflating "stuff it has read" (the data the LLM was trained upon) with "stuff it directly responds to" (the chunks of Context sent to it along with the System Prompt at inference time).
 
 The reply is a response to what the replier chose to engage with.
 
+Another example of of the Alpaca JSONL data structure we are working with is as :
 ```jsonl
 {
   "system": "You are a sales assistant at a fast food restaurant.",
@@ -3421,25 +3492,360 @@ Analyze the following ConTeXt mailing list thread. Ignore emotional reactions in
 Return JSON: {"instruction": "...", "input": "...", "output": "..."}
 ```
 
-## When I combine the original email and the quoted part of the present email, should I strip >+ quote marks?
-We should keep the ">" quote marks, and the "> >" quote marks, as LLMs recognize them as standard markers for conversational history ; whereas stripping them can make the model confuse who said what.  You should normalize messy nesting (like ">>>") to keep the context clean.
+## Staging Alpaca files.
+So that we will not be dynamically scrubbing and de-cribbing the "message_body" in every pass through the epoch, we aim to store on disk the high-quality Alpaca dataset resulting from pre-LoRA training.  
 
-### Explain more about how to normalize messy nesting.
-We ought to standardize inconsistent quoting.  Emails often have formats like "> > >" with spaces ; ">>>" without ; or random indentations.  We must collapse these to consistent "> " per nesting level (one "> " = original, "> > " = reply-to-reply), and trim excessive depth beyond 2-3 levels, because ancient context rarely helps the model learn.
+Now, upon initial training of *all* the historical emails' mboxes, so we need to employ some file-based cache to store the dataset on disk within the directory as `./pre-parsed/datasets` : which won't become automatically deleted when the training has finished.  The reason for not automatically deleting this high-quality dataset is because it is actually very valuable, and can be sold, or otherwise reused!  To repeat, we want the output from pre-LoRA training to be cached upon disk. The contents of this cache will have been PII-scrubbed (without personally identifiable information) and boilerplate-decribbed (which is the removal of repeated patterns at relevant locations between threads).  The contents of this cache will be the emails' bodies which are formatted into the Alpaca format for LoRA training.  The cache is purely an I/O optimization between epochs.
 
-## Background for a proposal.
-So that we will not be dynamically scrubbing and de-cribbing the "message_body" in every pass through the epoch, we aim to store in memory this intermediate result from pre-LoRA training, which will occur upon the latest mboxes added to the "admission section".  Now, upon initial training of *all* the historical emails' mboxes, it is possible that memory may be exceeded.  So we need to employ some file-based cache to store on disk within the directory as `./temp` which will be deleted when the training has become finished.  Whether or not this disk-based cache is used will depend upon the use and availability of RAM.  To repeat, we want the output from pre-LoRA training to be cached in memory and upon disk : RAM first, then spill to disk. The contents of this cache will be PII-scrubbed (without personally identifiable information) and boilerplate-decribbed (which is the removal of repeated patterns at relevant locations between threads).  The contents of this cache will be emails formatted into the Alpaca format for LoRA training.  The cache is purely an I/O optimization between epochs, not a GDPR surface, as we will not be processing GDPR requests between epochs.
+## Decontamination to Alpaca.
+After the creation of the high-quality Alpaca datasets we must perform fuzzy dedupe : which checks for contamination of Alpaca content between exact dedupes upon the `output` field alone.  This is because different instructions can yield near-identical completions, which causes the model to overweight that pattern.  Also, I want to fuzzy dedupe these entries within the Alpaca files which were output from pre-LoRA training, in order to prevent overfitting and cross-contamination between sets. Fuzzy dedupe will happen at the time of prior than the time of the training to the LoRA adapter, but after pre-LoRA training time.  We will MinHash each example's `intruction+input+output` (normalised: lowercase, collapse whitespace), and then find near-duplicates below a Jaccard threshold (~0.8), dropping the copies.
 
-Neither does this quarantining due to DSR requests have anything to do with fuzzy dedupe done at pre-LoRA training time, which checks for contamination of email-body content between threads, and hence between sets.  Fuzzy dedupe happens at the time of just prior than the training of the LoRA adapter, not at ingest time (mbox_pre-parser.rb), nor at digest time (splitter.rb).
+This, hopefully, should protect us against the case whereby some clever user, whether by accident or design, has copied a load of text between threads which would otherwise (without Jaccard and fuzzy dedupe between sets) impair our model's ability to make generalisations instead of regurgitation, after this content had randomly, but deterministically, gotten positioned in both "train" and "val", or in "train" and "test" via the 80/10/10 probability ratio.  This would be contamination and would impair ML.
 
-## A proposal
-I was thinking about, at pre-LoRA training time (not at ingest time, nor at digest time), a boilerplate file created (via "weak supervision") which contains stats about cribs (email signoffs, PIIs, "many thanks", etc.) so that state (pertaining to these cribs) can be retained between training runs (not regenerated totally each training time of LoRA). Then do a simHash on the message_body after crib removal, keeping a record of each simHash for each message_body (after crib substitution by intelligible placeholders and >+ removals). 
+**Question: When decontaminating Alpaca files via performing dedupe upon the `output` field of rows within the Alpaca file, is it better to search for near-identical completions rather than 100% matches?**
+
+Yes. Exact match misses paraphrases and whitespace drift.
+
+**If so, is it better to perform simHash and Hamming distance to filter them, or is it better to perform minHash and Jaccard similarity, and why?**
+
+MinHash gives sub-linear neighbour search with a tunable (b,r) precision/recall curve : which means that a minHAsh signature of length n=b.r is sliced into b bands of r rows ; and two docs collide if any band matches exactly.  Probability of collision = $1-(1-J^r)^b$ : an S-curve with threshold ≈ $(1/b)^{1/r}$. We tune (b,r) to sharpen recall above your Jaccard cuttoff. Sub-linear means that only hash-bucket candidates are compared, not all $\binom{N}{2}$ pairs. An S-curve is a sigmoid shaped function : which has the form as being flat near 0, with a steep rise in the middle, and flat near 1. By Local Sensitivity Hashing, $\Pr{\mathrm{(collision)}}=1-(1-J^r)^b$ is near 0 for low J, then sharply transitions to near 1 around the threshold $(1/b)^{1/r}$. The steepness is what makes LSH a *near-binary* filter : docs above the threshold almost always collide, and those below almost never. J = Jaccard similarity of the two sets being compared, i.e. $J = |A \cap B|\,/\,|A \cup B|$, ranging from 0 (disjoint) to 1 (identical). In this context it is the true overlap between k-shingle sets of two Alpaca outputs, which minHash is estimating.
+
+MinHash+Jaccard wins for Alpaca outputs because 
+- (1) Jaccard on k-shingles is set-based, so word reorderings and small insertions/deletions still produce high overlap, matching how paraphrased Alpaca outputs drift; 
+- (2) shingles are tokenizer-cheap with no weighting hyperparameters, whereas SimHash depends on TF-IDF (or another) weighting whose IDF shifts as the corpus grows, making thresholds non-portable; 
+- (3) LSH banding on MinHash gives sub-linear neighbor search with a tunable (b,r) precision/recall curve, while SimHash+Hamming needs multi-table bit-sampling that degrades on longer docs; 
+- (4) Alpaca outputs are multi-sentence (50-500 tokens) where SimHash's bit-vector loses resolution - SimHash shines on short, fixed-length text like tweets/headlines; 
+- (5) MinHash is the field standard for LLM corpus dedup (Pile, RedPajama, SlimPajama all use it), so thresholds (Jaccard ~0.8, 5-word shingles) are well-calibrated.
+
+In short, by minHash, shingles capture token-overlap regardless of word order, and it is robust to insertions and reorderings ; but simHash is brittle to our **Term-Frequency - Inverse Document Frequency** choice. 
+
+## What is MinHash?
+MinHash is the LSH (Locality-Sensitivity Hashing) technique that actually approximates Jaccard similarity.
+
+## Tell me about LSH.
+This is a family of techniques that hash similar items into the same buckets with high probability, so instead of comparing everything O(n²) pairwise, you only compare things that land in the same bucket, making near-duplication detection feasible at scale (minHash and simHash are both specific LSH schemes). It performs O(1) lookup comparisons per query (after O(n) preprocessing to build the hash tables), across the files as "train_first_pass.jsonl", "val_first_pass.jsonl", and "test_first_pass.jsonl". For millions of emails a disk-based cache is strongly recommended at that scale. Because our pipeline already uses SQlite, the natural path is one table per band with `(bucket_key TEXT, doc_ids BLOB)` : here, SQLite's mmap gives you sub-linear lookup without blowing up the Ruby heap.  Build once, read many.  A sub-linear lookup is one whose cost grows slower than $O(n)$ in dataset size : e.g. $O(\log n)$ B-tree index or $O(1)$ hash. 
+
+## Explain what a MinHash signature is.
+Whereas a simHash fingerprint is one 64-bit word, a MinHash signature is n 64-bit words ($n \times 8\,\mathrm{bytes}$), where n is a constant. This is larger but more informative as it gives a direct Jaccard estimate. The n min-hash values are stacked into a vector which forms a fixed sized representation. The 64-bit width is just the per-value precision ; it never enters the (b,r) maths.
+
+## How do I tune the number of buckets in minHash?
+n in b·r=n counts hash *values*, not bits. So n is constant once you pick it (e.g. n=128 means 128 min-hashes, ~128kB). Each "row" is one whole 64-bit min-hash, and each band is r of those rows (words) concatenated and re-hashed to a bucket key.
+
+You pick your Jaccard threshold `t` first, then choose `(b,r)` with b·r=n, so that $(1/b)^{1/r} \approx t$. The more bands `b` means *smaller* `r`. Where `b=16,r=8` this means we have 16 chances of landing within the same bucket, each with $\mathrm{P}={J^8}$. With `b=32,r=4` we have 32 chances of this, each with $\mathrm{P}={J^4}$. At `J=0.8`, the first gives $1-(1-0.8^8)^{16} \approx 0.985$ ; the second gives $1-(1-0.8^4)^{32} \approx 0.9998$. 
+
+**J** is the *true* Jaccard similarity of a specific pair of documents : which is a fixed property of that pair you cannot control.  **t** is the threshold you choose when designing the LSH scheme : you pick it based upon what you consider to be "near-duplicates" (e.g. 0.8). You then solve $(1/b)^{1/r} \approx t$ to find (b,r) so that pairs with `J>t` almost always collide, and `J<t` almost never. 
+
+The more bands, the shorter `r` is, the easier it is for a collision to occur.
+
+## What is your definition of a "collision" upon 2 documents?
+A **band** is a contiguous slice of `r` rows from the minHash signature (length n = b·r), whereby each band gets its own independent **table** : described as independent because each table hashes a completely different slice of the signature (different r min-hashes), such that the collision probability in one table tells you nothing about any other. That independence is what gives the $1-(1-J^r)^b$ formula its form : we have b independent Bernouilli trials. 
+
+Imagine you have 100,000 Alpaca outputs.
+
+**Build phase**: for EACH doc, for EACH of the b bands, hash that band's r min-hash values into a single bucket key, and append that doc's ID to the corresponding global bucket:
+```
+table_0: { bucket_key_0123 -> [doc_4, doc_19, doc_70000],
+           bucket_key_4521 -> [doc_91],
+           ... }
+table_1: { bucket_key_8832 -> [doc_4, doc_70000],
+           ... }
+...
+table_15: { ... }
+```
+
+**Lookup phase**: scan every bucket across all 15 tables. Any bucket with 2+ doc IDs means that pair collides in that band. Collect all such pairs (across all buckets, all tables) as candidate pairs. These are the pairs you then verify with full signature comparison.
+
+**Cost**: you store b·N bucket entries total, and candidates are only the pairs that appeared together in at least one bucket - typically orders of magnitude fewer than N²/2. 
+
+**Explanation**: table 0 hashes the first r rows of *every* document, and each document has different values in those rows. If doc A's first 8 min-hashes hash to key "abc123", and doc B's first 8 min-hashes hash to key "xyz789", then we will have different buckets within the same table. Only when two documents produce identical (or ***colliding***) band hashes do they land in the same bucket. Similar documents end up with the same band hash ; different ones land in different buckets.
+
+## What is simHash?
+simHash is the LSH technique that approximates cosine similarity.
+
+## What is Jaccard similarity?
+This is the intersection-over-union of sets. It is used for plagarism detection.
+
+## What is cosine similarity?
+This measures how similar two vectors are by the cosine of the angle between them. 1 means an identical direction. 0 means unrelated.
+
+## What are shingles?
+A shingle (or k-shingle) is just another name for a k-gram, which is a sequence of k consecutive words or characters used to break a document into a set of overlapping fragments so you can mathematically compare how similar two texts are using tools like Jaccard or MinHash.  
+
+## What is meant by simHash fingerprinting?
+In this context, "fingerprinting" is the process of turning some text data into a compact, mathematical signature, so that the system can instantly compare two data-messages for similarity, without performing slow word-for-word text matching. 
+
+It is how we **could** detect "near-duplicates", and do cross-split contamination guarding. SimHash generates a 64-bit "fingerprint" for text, where similar documents produce similar fingerprints. Unlike MD5/SHA, small changes result in small hash differences, allowing fuzzy matching via Hamming distance (count of differing bits). 
+
+## Comparison and fingerprint length of simHash.
+If I do a simHash on the text "Peter is a happy lad" and "Peter is a happy lad who has a dog", then because simHash always produces a fixed-sized fingerprint regardless of input length, and because the shorter text's features (tokens/shingles) are almost entirely contained in the longer one, the shared features will dominate the final hash, so the Hamming distance will be small.
+
+Whereas if I do a simHash on the text "Anne is a sad girl who has a dog" and "Peter is a happy lad who has a dog", these text differ in 3 content words and have a 5/9 shared number of words.  Using bigram shingles, we have 4/8 shared bigrams ("is a", "who has", "has a", "a dog").
+
+But if I do a simHash on the text as "Peter is a happy lad with a dog" and "Peter is a happy lad without a horse", then they share 5/8 words and 4/7 bigrams.
 
 
 
-Now we have the data to do the inspecting of the Hamming distance between emails.  This is done so that we can ignore both cribs and duplicates *between* threads, for Alpaca and ML, so that downstream training of LoRA can ignore verbatim content (or near-verbatim content) which was copied between email threads. This, hence, will hopefully assist towards prevention of contamination between our sets/pools.  Stripping boilerplate before simhash means we are comparing actual content semantics, not just shared label signatures ;  though we need to make sure that our simhash Hamming distance threshold is correctly tuned on, because the "correct" cutoff varies wildly by domain (emails can be legitimately similar without being duplicates). Contamination is primarily about **verbatim or near-verbatim overlap**, not semantic similarity, i.e. not upon *content meaning* but upon *verbatim content*.  We don't want the model memorizing exact text from "train" that appears in "val", artifically inflating your metrics.  The same applies to exact text from "train" appearing both in "train" and within "test". 
+## Explain the Jaccard similarity of the MinHashes between the sentences as "Peter is a happy lad" and "Peter is a happy lad who has a dog".
+First, tokenize into k-word shingles (let's use 3):
 
-## Why I ought not to do simHash Hamming (fuzzy) dedupe *within* an email thread.
+A = "peter is a happy lad" → shingles: {"peter is a", "is a happy", "a happy lad"} 
+
+B = "peter is a happy lad who has a dog" → shingles: {"peter is a", "is a happy", "a happy lad", "happy lad who", "lad who has", "who has a", "has a dog"}
+
+Classic Jaccard = |intersection| / |union| = 3/7 ≈ 0.43
+
+MinHash estimates this without materializing the sets: for each random hash function, take the minimum hash value across all shingles of A and B. Each function independently has probability exactly equal to the true Jaccard similarity of producing the same minimum. Average across N hash functions → converges on 0.43.
+
+So if your LSH threshold is 0.8, this pair stays in. If it were 0.4, it'd be flagged as a near-duplicate and one gets dropped.
+
+## Explain MinHash's random hash function in more detail.
+
+Each "random hash function" $h_i$ maps shingles -> large integers (e.g., 64-bit) uniformly and independently. In practice you don't pick N truly-random functions ; you pick one base hash (MurmurHash, SHA1-truncated) then derive N variants via 
+
+$h_i(x) = (a_i * h(x) + b_i)$ mod p
+
+with random per-function ($a_i, b_i$) - a universal hash family. The magic : for a random permutation of the universe of all possible shingles, `P(argmin over A == argmin over B) = |A∩B|/|A∪B|` exactly, because the minimum of the union must land in `A∩B` iff the sets agree there - and each element is equally likely to be the min. Hash functions cheaply *simulate* random permutations. So the MinHash signature is just the [$\mathrm{min(h_i(s))}$ for `s` in `shingles`] per function. So we compare two signatures element-wise, and this fraction equals the Jaccard estimate, with variance inversely proportional to the number of hash functions within the universal family of functions. Each hash gives one Bernoulli trial, and doubling N halves the variance. The family provides the independence. Only N drives the rate of diminution in the Variance. Where 
+
+| Object	|Meaning |
+|---|---|
+|$X_i$	|$\mathbf{1}[\mathrm{MH}{h_i}(A) = \mathrm{MH}{h_i}(B)] \sim \mathrm{Bernoulli}(J)$|
+|$\widehat{J}$	|$\frac{1}{k}\sum X_i$ - fraction of matching signature slots|
+|$E[\widehat{J}]$	|$J(A, B)$ - unbiased|
+|$\mathrm{Var}(\widehat{J})$	|$J(1-J)/k$ - shrinks linearly in $k$|
+|$\mathrm{SE}(\widehat{J})$	|$\sqrt{J(1-J)/k} \leq 1/(2\sqrt{k})$|
+
+- **Standard deviation**: spread of the data/variable itself (e.g., individual Bernoulli outcomes $X_i \sim \text{Bernoulli}(J)$)
+
+- **Standard error**: spread of the estimator's sampling distribution (e.g., $\hat{J} = \frac{1}{k}\sum X_i$ across hypothetical repeated experiments)
+
+Both are $\sigma$ of some distribution. "Standard error" is shorthand for "standard deviation of the estimator" - it tells you "this is about the accuracy of a quantity estimate, not the variability of raw observations." Same math, different object, different name.
+
+1. **The universe U**
+
+   Fix a finite (or countably infinite) **universe** `U`. Every object we will ever hash is an element of `U`. For text near-duplicate detection, `U` is the set of all possible **shingles** (see §2).
+
+2. **Shingles**
+
+   Given a document $d$ represented as a token sequence $(t_1, t_2, ..., t_n)$ and a fixed integer `k >= 1`, the **k-shingle multiset** of $d$ is
+
+   $
+   \mathrm{shingle_k}(d) = { (t_i, t_{i+1}, ..., t_{i+k-1}) }
+   $ : 1 <= i <= n - k + 1 
+   
+   i.e. the set of contiguous length-k subsequences. Taking it as a set (not a multiset) discards repetition. Each shingle is an element of $U = T^k$, where $T$ is the vocabulary.
+
+   Example with `k = 3`:
+
+   * `A` = $\mathrm{shingle_3}$("peter is a happy lad") = { "peter is a", "is a happy", "a happy lad" }
+   * `B` = $\mathrm{shingle_3}$("peter is a happy lad who has a dog") = `A` ∪ { "happy lad who", "lad who has", "who has a", "has a dog" }
+
+3. **The set S**
+
+   `S` is just shorthand for whichever subset of `U` we are summarising. In the two-document case we work with `A ⊆ U` and `B ⊆ U`. The **Jaccard similarity** is the set-theoretic ratio
+   ```math
+   J(A, B) = |A ∩ B| / |A ∪ B|     ∈ [0, 1] 
+   ```
+   For our running example, `|A ∩ B| = 3`, `|A ∪ B| = 7`, so `J = 3/7 ≈ 0.4286`.
+
+4. **Permutations of U**
+
+   A **permutation** of `U` is a bijection `π : U -> U`. Equivalently (and more usefully) think of `π` as inducing a total order on `U`: element `x` precedes `y` iff `π(x) < π(y)` under some fixed linear order on the codomain.
+
+   `Sym(U)` denotes the set of all such permutations. When `U` is finite of size `m`, `|Sym(U)| = m!`.
+
+5. **argmin under a permutation**
+
+   For a non-empty $S ⊆ U$ and a permutation $π$, $\mathrm{argmin}_{x ∈ S} (π(x))$  :=  the unique $x* ∈ S$ with $π(x*) = \min(π(x)) : x ∈ S $
+   
+   `argmin` returns the **element** ; `min` returns the value. Bijectivity of `π` guarantees uniqueness, so `argmin` is well-defined.
+
+       
+   Where `π~Uniform(Sym(U))` means a random variable sampled uniformly from the symmetric group on `U`, this means that every permutation in `Sym(U)` has equal probability `1/|Sym(U)|` of being selected.
+
+   `π(x)` is just an integer rank from `1` to `|U|`. It's a true bijection - every shingle gets an unique integer, each appearing exactly once, like rolling all of U onto a numbered strip. The values ARE the integers `1..|U|`, permuted uniformly at random. No shingle gets a "lower" rank more than any other because `π~Uniform(Sym(U))` : i.e. the uniformity is on the choice of permutation, not on the values themselves.
+
+    So `π(x*)` literally looks like a big random-looking integer. The "uniformity" isn't about the integer values looking uniform : i.e. having a fixed length ; it is about the ranking of those values within any finite set being uniformly distributed over all possible orderings.
+
+    A uniform permutation of set S (which is a subset of all possible shingles) has a symmetry of the symmetric group acting on itself. If `π~Uniform(Sym(U))`, then for any fixed $\sigma ∈ \mathrm{Sym}(U)$ the composition $\sigma \circ \pi$ is also Uniform(Sym(U)), i.e. the distribution is invariant under left-multiplication by any permutation. The consequence is exchangeability : as relabelling shingles can't change any probability, so no element of S is priviliged. Hence $\Pr{(\mathrm{argmin}=x}) = 1/|\mathrm{S}|$ for every $x ∈ \mathrm{S}$
+
+6. **The defining theorem of MinHash**
+
+   **Claim**. Let `π` be drawn uniformly from `Sym(U)`. Then
+
+   ```math
+   Pr[ \mathrm{argmin}_{x ∈ A} (π(x)) = \mathrm{argmin}_{x ∈ B} (π(x)) ] = J(A, B)
+   ```
+
+   **Proof sketch**. Condition on the element `z ∈ A ∪ B` that receives the smallest `π`-value among `A ∪ B`. By symmetry of the uniform permutation, every element of `A ∪ B` is equally likely to be that `z`. The two argmins agree **iff** `z ∈ A ∩ B`. That probability is `|A ∩ B| / |A ∪ B| = J(A, B)`. ∎
+
+   Then for any finite `T⊆U`, the induced ranking of `T` is a uniformly random permutation of `T` : no element is privileged. The consequence is that $\Pr(\mathrm{argmin_T} (π) = t)$ = `1/|T|` for every `t∈T`. So for `T=A∪B`, the argmin is uniform on `A∪B`, and $\mathrm{argmin_A} = \mathrm{argmin_B}$ **iff** that argmin lands in `A∩B`, giving `P=|A∩B|/|A∪B| = J(A,B)`.  The whole MinHash theorem rides upon this single symmetry.
+
+7. **Hash functions as proxies for permutations**
+
+   Sampling uniformly from `Sym(U)` is infeasible (`|Sym(U)|` is astronomical and storage cost is `Ω(|U| log |U|)`). We replace `π` by a **hash function**
+   ```math
+   h : U -> [0, M)
+   ```
+
+   with `M` typically $2^{64}$
+  
+   drawn from a family `H` with two properties:
+
+   * 1. **Uniformity**. For `h ~ H` and any `x ∈ U`, `h(x)` is approximately uniform on `[0, M)`.
+   * 2. **Pairwise (or higher) independence**. For distinct `x ≠ y`, `h(x)` and `h(y)` are approximately independent.
+
+   The standard cheap construction is the **universal family**
+
+   $
+   h_{a,b}(x) = ((a · H_0(x) + b)
+   $ mod p) mod M
+
+   where $H_0$ is a fixed strong hash (MurmurHash3, xxHash, SHA-1-truncated) mapping `U -> [0, p)`, `p` is a large prime, and `(a, b)` are sampled per function with `a ∈ [1, p)`, `b ∈ [0, p)`. Each `(a, b)` yields a different $h_i$. Collisions among distinct shingles are rare enough that the "hash-as-permutation" approximation is excellent in practice.
+
+   `U` is astronomically large (all possible shingles from all possible text), so we can't enumerate it. Instead we use `h: U → [0, M)` - a fixed-width hash (e.g. 64-bit integer), i.e. `h` maps to {${0, 1, 2, ..., 2^{64} - 1}$}. This is NOT a true bijection (collisions exist in the full universe). But the key insight: for any finite subset `T ⊆ U` with `|T| << M`, the induced ordering of h-values on `T` is indistinguishable from a true random permutation of `T`. That's what universal hash families guarantee : the values look uniformly spread and no subset of shingles clusters low or high.
+
+8. **The MinHash of a set under one hash**
+
+   For a non-empty `S ⊆ U` and a single hash `h`,
+
+   ```math
+   MinHash_h(S) := min_{x ∈ S} (h(x))
+   ∈ [0, M) 
+   ```
+
+   (Some references define MinHash as `argmin` rather than `min`. They are information-equivalent for the equality test, since equal argmins imply equal mins for the *same* `h`. We use `min` because it is what we store.)
+
+   By the theorem of §6 (lifted from `π` to `h`):
+
+   $
+   \Pr_{h \sim H}[ MinHash_h(A) = MinHash_h(B) ] ≈ J(A, B)
+   $
+
+9. **The signature**
+
+   Pick `k` independent hashes $h_1, ..., h_k$ ~ H. The **MinHash signature** of `S` is the vector
+
+   ```math
+   sig(S) := ( MinHash_{h_1}(S), MinHash_{h_2}(S), ..., MinHash_{h_k}(S) ) ∈ [0, M)^k
+   ```
+ 
+   It is a fixed-size sketch (`k` integers) regardless of `|S|`.
+
+10. **Why this matters for Alpaca dedupe**
+
+    You do not actually compare every pair of `N` documents (that is `O(N^2)`). You feed the signatures into **LSH (Locality Sensitive Hashing)**: split each signature into `b` bands of `r` rows, hash each band, and candidate-pair only items that share at least one band-hash. This gives you `O(N)` candidate generation with a tunable S-curve threshold around your desired Jaccard cutoff (e.g. 0.8 for "near-duplicate Alpaca examples").
+
+### TL;DR
+- Permutations give an **exact** identity: `P(argmin matches) = Jaccard`
+- We cannot afford true permutations, so we **simulate** them with a universal hash family $h_i(x) = (a_i * H(x) + b_i)$ mod p
+- The randomness lives in the per-function $(a_i, b_i)$ pairs, picked once
+- Averaging `k` independent matches gives an unbiased Jaccard estimate with `1/sqrt(k)` error
+### MinHash: The Bernoulli Estimator
+1\. **Bernoulli Trial**
+
+A Bernoulli trial is the simplest non-trivial random experiment: a single observation of a random variable $X$ that takes exactly two values, conventionally encoded as
+
+$$X \in {0, 1}, \qquad \Pr[X = 1] = p, \qquad \Pr[X = 0] = 1 - p$$
+
+with $p \in [0, 1]$ a fixed parameter. We write $X \sim \mathrm{Bernoulli}(p)$.
+
+  Canonical interpretation: $X = 1$ is "success", $X = 0$ is "failure". The classical example is a single coin flip with $p = 1/2$, but $p$ is arbitrary.
+
+Its moments are trivial to compute directly from the definition of expectation $E[X] = \sum_x x \cdot \Pr[X = x]$:
+
+$$E[X] = 1 \cdot p + 0 \cdot (1 - p) = p$$
+
+$$E[X^2] = 1^2 \cdot p + 0^2 \cdot (1 - p) = p$$
+
+$$\mathrm{Var}(X) = E[X^2] - (E[X])^2 = p - p^2 = p(1 - p)$$
+
+Note $\mathrm{Var}(X) \leq 1/4$, maximized at $p = 1/2$ (maximum uncertainty), and vanishes at $p \in {0, 1}$ (deterministic).
+
+2\. **Each MinHash Collision is Bernoulli**
+
+For independent random hash functions $h_1, \ldots, h_k$ (each simulating a uniform permutation $\pi_i \sim \mathrm{Uniform}(\mathrm{Sym}(U))$), define
+
+$$X_i = \mathbf{1}\bigl[,\mathrm{MinHash}\ {h_i}(A) = \mathrm{MinHash}\ {h_i}(B),\bigr]$$
+
+where $\mathbf{1}[,\cdot,]$ is the indicator function (1 if the event holds, 0 otherwise). By the MinHash theorem we already proved,
+
+$$\Pr[X_i = 1] = \Pr\bigl[\mathrm{argmin}_{x \in A} (\pi_i(x)) = \mathrm{argmin}_{x \in B} (\pi_i(x))\bigr] = \frac{|A \cap B|}{|A \cup B|} = J(A, B)$$
+
+So each $X_i \sim \mathrm{Bernoulli}(p)$ with $p = J(A, B)$. The hash functions $h_i$ are chosen independently, so $X_1, \ldots, X_k$ are i.i.d. (independent and identically distributed).
+
+3\. **The Estimator**
+
+Define the sample mean of these $k$ Bernoulli trials:
+
+$$\widehat{J}(A, B) = \frac{1}{k} \sum_{i=1}^{k} X_i$$
+
+Operationally: compare the two signature vectors of length $k$ component-wise and count the fraction of matching positions. That fraction is an estimate of $J(A, B)$.
+
+4\. **Unbiased: $E[\widehat{J}] = J(A, B)$**
+
+By linearity of expectation (which requires no independence assumption):
+
+$$E[\widehat{J}] = E\left[\frac{1}{k}\sum_{i=1}^{k} X_i\right] = \frac{1}{k}\sum_{i=1}^{k} E[X_i] = \frac{1}{k} \cdot k \cdot J(A, B) = J(A, B)$$
+
+"Unbiased" means averaged over the randomness in the hash functions : the estimator hits the true Jaccard exactly. No systematic over- or under-estimation. The errors are pure noise, not skew.
+
+5\. **Variance: $\mathrm{Var}(\widehat{J}) = J(1 - J)/k$**
+
+Because the $X_i$ are independent, variance is additive (this step DOES require independence; expectation did not):
+
+$$\mathrm{Var}\left(\sum_{i=1}^{k} X_i\right) = \sum_{i=1}^{k} \mathrm{Var}(X_i) = k \cdot J(1 - J)$$
+
+Scaling by $1/k^2$ pulls out a $1/k$ factor:
+
+$$\mathrm{Var}(\widehat{J}) = \frac{1}{k^2} \cdot k \cdot J(1 - J) = \frac{J(1 - J)}{k}$$
+
+The variance is inversely proportional to $k$. Doubling the number of hash functions halves the variance.
+
+6\. **Standard Error: $\approx 1/\sqrt{k}$**
+
+The standard error of the estimator is the the typical size of its deviation from the truth:
+
+$$\mathrm{SE}(\widehat{J}) = \sqrt{\mathrm{Var}(\widehat{J})} = \sqrt{\frac{J(1 - J)}{k}}$$
+
+Since $J(1 - J) \leq 1/4$ for all $J \in [0, 1]$, we get the dimensionally clean bound
+
+$$\mathrm{SE}(\widehat{J}) \leq \frac{1}{2\sqrt{k}} = O\left(\frac{1}{\sqrt{k}}\right)$$
+
+This is the classic square-root-of-n law of statistics: precision grows with the square root of sample size. To halve the error, you must quadruple $k$.
+
+**Numerical feel**:
+
+| $k$	| Worst-case SE $\approx 1/(2\sqrt{k})$ |
+|---|---|
+|16	|0.125|
+|64	|0.0625|
+|128 |0.044|
+|256	|0.031|
+|1024	|0.0156|
+
+So with $k = 128$ hashes - a common MinHash signature length - you estimate Jaccard to roughly $\pm 0.04$ in the worst case (and tighter when $J$ is near 0 or 1, since $J(1-J)$ vanishes there). That precision is plenty for fuzzy dedup at a threshold like $J \geq 0.8$.
+
+**Tail behaviour (Hoeffding)**
+Because each $X_i$ is bounded in $[0, 1]$, Hoeffding's inequality gives an exponential concentration bound:
+
+$$\Pr\bigl[,|\widehat{J} - J| \geq \varepsilon,\bigr] \leq 2 e^{-2 k \varepsilon^2}$$
+
+So large deviations are exponentially rare in $k$. For $k = 128$, $\varepsilon = 0.1$: $2 e^{-2 \cdot 128 \cdot 0.01} = 2 e^{-2.56} \approx 0.155$. For $k = 256$: $\approx 0.024$. The estimator concentrates fast.
+
+## A failed proposal
+I was thinking about, at pre-LoRA training time (not at ingest time, nor at digest time), a boilerplate file created (via "weak supervision") which contains stats about cribs (email signoffs, PIIs, "many thanks", etc.) so that state (pertaining to these cribs) can be retained between training runs (not regenerated totally each training time of LoRA). Then do a simHash on the `message_body` after crib removal, keeping a record of each simHash for each `message_body` (after crib substitution by intelligible placeholders and >+ removals).  Now we would have the data to do the inspecting of the Hamming distance between emails' bodies. This would be done so as to ignore both cribs and duplicates *between* threads, for Alpaca and ML, so that downstream training of LoRA can ignore verbatim content (or near-verbatim content) which was copied between email threads. Hence, it was thoughtm naively, this would hopefully assist towards prevention of contamination between our sets/pools.  Stripping boilerplate before simhash would mean we would be comparing actual content semantics, not just shared labelled signatures such as boilerplate and the PII ; though we would need to make sure that our simhash Hamming distance threshold would be correctly tuned, because the "correct" cutoff varies wildly by domain (emails can be legitimately similar without being duplicates). Contamination is primarily about **verbatim or near-verbatim overlap**, not semantic similarity, i.e. not upon *content meaning* but upon *verbatim content*.  We wouldn't want the model memorizing exact text from "train" that appears in "val", artifically inflating your metrics.  The same applies to exact text from "train" appearing both in "train" and within "test". 
+
+This dictionary would accrue newer signatures from newer users whose messages are arriving in newer email batches, necessitating the need of a dictionary mutable manifest file like a JSON structure : which ought to be able to evolve over time.
+
+The reason why this is a **failed proposal** is 
+
+1. Doing such a thing would prevent the SLM which creates the Alpaca files censoring the boilerplate and PII itself, when the first generation (not decontaminated) Alpaca files become created, prior to the stage of fuzzy deduplication. When we do do decontamination, we use minHash and Jaccard similarity, not simHash and Hamming distance.
+
+2. Having a boilerplate dictionary is too brittle and too static, and it is also unnecessary.  Cluttering up our staging area with a immutable manifest upon the addition of boilerplates and PIIs would be an inefficient way in which to work because how would we treat two near-signatures, for example "with love from George" and "with love from Jorge"?
+
+     You could store *templatized* patterns (regex or slot-based like `"with love from {NAME}"`) rather than verbatim strings, or regex "with love from \w+", as I don't want to fill the boilerplate crib data file with "with love from George", *and* with "with love from Jorge".  We would be specifying within our boilerplate crib file (potentially a JSON file) that both are the same, and are to be omitted from the next stage as comparing the Hamming distance between the simhashes of 2 documents BETWEEN threads (but never *within* threads), and hence between sets, prior to the subsequent Alpaca format creation. The filtering by comparing between threads is intended to be a protection against a scenario where a user copies text from one thread to another thread, and thereby might contaminate the sets.
+
+### Why I ought *not* to do simHash Hamming distance filtering *within* an email thread.
 Because the first email might be 
 ```txt
 printg('Hello')
@@ -3448,188 +3854,18 @@ whereas the reply might be
 ```txt
 printf('Hello')
 ```
-Intra-thread similarity is a *signal* (corrections, refinements, quoted context).  But if this is the exclusive email content *between* threads then we *do* wish to filter it both to avoid dataset pollution, and to avoid repetition of verbatim text within a sets ; i.e. between "train" and "val" and between "train" and "test". Inter-thread is noise. Our dedupe should only compare emails across different thread_ids, treating each thread as a conversational unit where internal redundancy is intentional and meaningful.
+Intra-thread similarity is a *signal* (corrections, refinements, quoted context).  But if this is the exclusive email content *between* threads then we would wish to filter it both to avoid dataset pollution, and to avoid repetition of verbatim text within a sets ; i.e. between "train" and "val" and between "train" and "test". Inter-thread is noise. Our dedupe ought only compare emails across different `thread_ids`, treating each thread as a conversational unit where internal redundancy is intentional and meaningful.  
 
-## How would this dictionary accrue newer signatures from newer users whose messages are arriving in newer email batches? Do we need a dictionary mutable manifest file like a JSON structure?  
-A mutable "boilerplate_dict.json" makes sense. This file ought to be able to evolve over time.
+If we would perform intra-thread simHash Hamming distance filtering (after crib removal), then two emails with similar content, but within the same thread, will be simHash Hamming distance filtered. For example, if a correction to the verbatim code contained within an email was made, then this crucial correction might involve only a few characters, but these emails would be very similar in terms of Hamming distance, and one, or both, would be blocked. We wouldn't want this correction at all, as we would *need* this original context, and the response to it (the content which this response was a response to, and the response itself), eventually within the same thread, and thus within the same set (e.g. say, "train") in order for ML (machine learning) to happen, i.e. we woudn't wish to drop either emails from the content which is being read from the JSONL shards which were output from "bin/mbox_pre-parser.rb" if those contents are within the *same* email thread.
 
-TO DO.  Implement this.
-
-## And how would we treat two near-signatures, for example "with love from George" and "with love from Jorge"?
-You would store *templatized* patterns (regex or slot-based like `"with love from {NAME}"`) rather than verbatim strings, or regex "with love from \w+", as I don't want to fill the boilerplate crib data file with "with love from George", *and* with "with love from Jorge".  We are specifying within our boilerplate crib file (potentially a JSON file) that both are the same, and are to be omitted from the next stages of fuzzy dedupe (simhash Hamming distance) between threads, and hence between sets, prior to the subsequent Alpaca format creation.  Fuzzy dedupe between threads is intended to be a protection against a scenario where a user copies text from one thread to another thread, and thereby might contaminate the sets.  
-
-## Advise me how to set score levels for my fuzzy deduplication of email messages. Do I vary the input level that the mbox_pre-parser.rb dedupes upon?
-You should vary the threshold mbox_pre-parser.rb uses would use for the deduplication via a hypothetical `--simhash-threshold` input option.  It defaults to 3.  A higher number (e.g. 5 to 7) will catch more similarly looking variants, while a lower number (1 to 2) is safer to avoid false-positive deletions of legimate short replies like "Thank you" or "Okay", which I suspect are not very useful for AI training.  
-
-
-## Advise me how to set score levels for my fuzzy deduplication of email messages between threads. How do I vary the input level whcih the "bin/contamination_guard.rb" fuzzy dedupes upon?
-
-If the same message was sent twice with different Message-IDs (common in cross-postings or resends within a thread),  `bin/mbox_pre-parser.rb` will miss them, and this is where our simHash-based deduplication in `bin/contamination_guard.rb` provides the necessary safety net at pre-LoRA training time, not at digest, nor at ingest time.
-
-We want to do this prior to the actual LoRA training time (training of the LoRA adapters), *not* at ingest time, because at ingest time, "bin/mbox_pre-parser.rb" has no semantic concept of email threads, and we *don't* wish to drop either of or both of two similar (Hamming distance) messages from *within* any thread because these messages, although appearing similar, may contain crucial amendments in a code-rich email (even by as little as a character, or a few characters).  Think of an email containing "My code is `printg "hello world"`", to which the response is "Typo dude. Use `printf "Hello world"`". 
-
-To catch near-duplicates prior to LoRA training time *between* threads, not *within* threads, the "bin/contamination_guard.rb" bakes in its own version of simhash.
-- **Logic**: It generates a 64-bit fingerprint of message bodies and compares them using Hamming distance.
-- **Sensitivity**: Controlled by `--threshold FLOAT` (default: 0.7). A lower threshold is more strict (requiring closer similarity to trigger a drop), while a higher threshold catches more distantly related variations. The easiest contents to catch will be legitimate short replies such as "Thank you", or "Okay", which I suspect are not very useful for AI training.
-- **Performance**: We are comparing a constant number of buckets in one set against a constant number of buckets in another set, thus the two numbers mulitplied by each other is O(constant), or O(1) time.
-
-
-## What are we *will* doing at pre-LoRA training time (i.e. not within "mbox_pre-parser.rb") shall be:
-
-- i. Creating a boiler_plate dictionary of cribs and repeated patterns from our email bodies by using a weak supervision llm inference, not frequency analysis.
-- ii. Dynamically removing cribs and boilerplate duplications from the message_body (the result to be kept in RAM) before fingerprinting this modified message_body (with the cribs excised) using simHash for fuzzy dedupe. 
-- iii. Performing fuzzy deduplication on these fingerprints, so that the creation of the Alpaca format, pertaining to inter-thread messages which are too near to each other in content, doesn't happen. This would have been done to avoid training upon absurd messages like "thankyou" or "cheers", and so that similar messages won't appear both in the "train" and "val" sets, nor in "train" and "test". Note that this has nothing to do with the metadata that gets put into the manifest file.
-
-We will *NOT* be doing any of this at the ingest time (in favour of doing it at pre-LoRA training time), because within such a failed, and rejected, proof of concept as doing it at ingest time, we would have used "fuzzy dedupe" in fingerprints at the pre-parser stage, after crib removal, in order to *not* include these similar messages within the JSONL output shard files from "mbox_pre-parser.rb" ; and hence the metadata for these similar messages would not be able to have gotten put into the manifest file!  We reject this approach because:
-
-* The pre-LoRA training stage will involve the creation or amendment to a JSON-based pattern crib, in order to use boilerplate stripping (done via an llm weak supervision at inference time), so that we can do simhash fingerprinting on all email bodies which have had their cribs dynamically excised, and replaced by placeholders, in order to perform inter-thread simhash filtering, while keeping the intra-thread signal clean for the Alpaca format output.
-* We do all this at pre-LoRA training stage, rather than the pre-processing stage (ingest), or the manifest creation stage (digest), because (a) the train/val/test split must happen at ingest time upon stable, content-unmodified data, so that, at pre-LoRA training time, we can generate Alpaca formats with various pattern cribs dynamically removed, without invalidating the split manifest, (b) boilerplate patterns are successively discovered during the inspection done to the email bodies, so baking them in to pre-processing would create a rebuild-everything loop, and (c) inter-thread simhash filtering is semantically a curation decision (deciding what is "too similar"), and we want it tunable independently of the immutable shards, which are output from "mbox_pre-parser.rb".
-* We *now* have the right separation of concerns to avoid the "Oh no. I have to rebuild everything" trap that kills so many ML data projects.
+PLEASE NOTE that all this pertains to our failed proposal still (of having a boilerplate file) which we will *not* be doing. Instead we will be generating decontaminated Alpaca files, such as "train_decontaminated.jsonl", "val_decontaminated.jsonl", and "test_decontaminated" from "train_first_pass.jsonl", "val_first_pass.jsonl", and "test_first_pass.jsonl" respectively. 
 
 ## An astute observation.
 I have an observation whereby the problem is the following.  
 - The problem. The context of the location of the crib within the email is paramount.  If we blithely and blindly remove "love from" from the sentence mid-email as "Russia's latest aggression comes with love from Vlladimir Putin" then this sentence becomes "de-cribbed" to become "Russia's latest agression comes with Vlladimir Putin" where the crib was not actually a crib.  This is not what we want to do.
-- The proposed solution. Either our crib patterns within the boilderplate crib file need positional anchors (e.g. "appears within last N lines", or is preceded by a signature delimiter) or they require stuctural content like "followed by {NAME}" in order to disambiguate sign-off boilerplate from legitimate text ; or, more usefully, we use an AI LLM at inference time (weak supervision) to decide what is a crib and what is not.  Another weak supervisor LLM can supervise the original llm in order to be doubly certain.
+- The proposed solution.  We use an AI SLM at inference time (weak supervision) to decide what is a crib and what is not. Another weak supervisor SLM can supervise the original SLM in order to be doubly certain.
 
-# Why we don't perform intra-thread fuzzy dedupe (after crib removal) at curation time.
-If we would perform intra-thread fuzzy dedupe (after crib removal) at pre-LoRA training time, then two emails with similar content, but within the same thread, will be fuzzy deduped.  This is especially relevant where you are training the LoRA adapters upon code-rich emails.  For example, if a correction to the verbatim code contained within an email was made, then this crucial correction might involve only a few characters, but, by fuzzy dedupe these emails would be very similar in terms of Hamming distance, and one, or both, would be blocked.  We don't want this at all, as we *need* this original context, and the response to it (the content which this response was a response to, and the response itself), eventually within the same thread, and thus within the same set (e.g. say, "train") in order for ML (machine learning) to happen, i.e. we don't wish to drop either emails from the content which is being read from the JSONL shards which were output from "bin/mbox_pre-parser.rb" if those contents are within the *same* email thread.  
-
-We *will* eventually desire to do a test of Hamming distance between emails between "train" and "val" at training time (and "train" and "test"), to protect us against the case whereby some clever user, whether by accident or design, has copied a load of text between threads which would otherwise (without Jaccard and fuzzy dedupe between sets) impair our model's ability to make generalisations instead of regurgitation, after this content had randomly, but deterministically, gotten positioned in both "train" and "val", or in "train" and "test" via the 80/10/10 probability ratio.  This would be contamination and would impair ML.
-
-# Why we *do* train upon '> ' characters when we create our Alpaca format output at the end of the Curation stage.
-We must not remove the quoted text of 3 times "> " or fewer "> "s, (i.e. "> > > " or less) from each email body which contains quotes from previous messages within this thread, at pre-LoRA training time, because the model may need these to learn ; but our model can't train upon quoted text which contains 4 or more "> ", (i.e. more than quotes within quotes within quotes) as this might confuse it. 
-
-We must not censor this data content duplication intra-thread, because doing so would break our model's ability to learn associations between concepts. So, we must remove 4 or more levels of quoted text at pre-LoRA traing time, outputting the stripped version to the relevant part of the data Alpaca data structure format. After we have done this, we also trim trailing white space from the end of each line within the email body in our attempt to avoid hallucinations.  We wish to keep the whitespace at the beginning of, and within, the middle of each line as this may be beneficial to the model learning syntax.
-
-TO DO.  IMPLEMENT THIS.
-
-# Why we don't ignore this duplication of data from a previous email, which is being quoted within the present one.
-We would be mistaken to think that we ought to ignore quoted text within reply-to emails, or that we ought to do this in order to remove "noise", and to remove duplication : quoted text is often a repetition of information from earlier within an email thread. If we don't imply this "context" within the "input" field, taken from the present email as the text quoted (by using "> ") from the previous email, of which this present one is as an "In-Reply-To" (which is a field taken from the email header for metadata for RAG), then this can distort the model's understanding, and also waste computational resources. 
-
-## What is meant by simHash fingerprinting within "bin/contamination_guard.rb"?
-In this context, "fingerprinting" is the process of turning a long email body into a compact, mathematical signature, so that the system can instantly compare two messages for similarity, without performing slow word-for-word text matching. It is how we detect "near-duplicates", and do cross-split contamination guarding. SimHash generates a 64-bit "fingerprint" for text, where similar documents produce similar fingerprints. Unlike MD5/SHA, small changes result in small hash differences, allowing fuzzy matching via Hamming distance (count of differing bits). For fuzzy deduplication we may use the rubygem as simhash2.
-
-## What is "bin/contamination_guard.rb" for?
-`contamination_guard.rb` is a post-materialization audit tool that catches data leakage across inter-thread splits, and thus across your train/val/test splits. At pre-LoRA training time, after we have done previously dynamic boilerplate ceation of the cribs within the emails, and have done dynamic crib removal from these emails, `contamination_guard.rb` fingerprints each record using both k-shingles (Jaccard similarity) and a hand-rolled SHA256-based SimHash (Hamming distance), either facilitating :
-
-* 1. By default, no local-sensitivity, which will subsequently require an inspection of O(n²) pairwise comparisons across splits to find near-duplicates that slipped past the thread_id hashing (e.g., forwarded emails, templates, copy-pasted content in unrelated threads). 
-* 2. With local-sensitivity, whereby each fingerprint is bucketed into bands : so that we will only compare decribbed email bodies that land within the same bucket.  For n decribbed email bodies, the time taken to put each into a bucket is O(n), and to compare the items within the same bucket is near to O(1) per bucket if the number of buckets has been tuned correctly. We need to compare every bucket in train against every bucket in val, and every bucket in train with every bucket in test, and every bucket in val with every bucket in test. 
-
-In both cases, if contamination between sets is found, `contamination_guard.rb` applies a quarantine policy (nuke test/val items, nuke both sides, or flag for coassignment) and outputs an exclusion_ids.txt for downstream filtering, failing the pipeline if contamination exceeds 1%. Worth noting: it rolls its own simhash() function.
-
-### When you say it nukes test/val items, does this mean that this is kind of like a tombstone and the items within the immutable manifest get nuked/altered/marked, or does this "nuking" merely mean that an entry is made to the "exclusions.txt" file for downstream filtering?
-It is strictly the latter.  The contamination guard will overwrite "exclusions.txt" (via `generate_exclusion_list`) leaving your immutable manifest and original shards untouched.  This downstream list is then used by training/eval pipelines to ignore high-signal "leakage" rows. No rematerialization is needed as the immutable manifest file is not touched anyway.
-
-### Does "exclusions.txt" contain only metadata or does it contain the email bodies itself?
-It is strictly metadata.  The `generate_exclusion_list` method simply takes the set of flagged `record_id`s and joins these with newlines, so you get a plain text file of unique IDs (hashes) that the model trainer should ignore. No email content is included.
-
-### What is Jaccard similarity?
-This is the intersection-over-union of sets. It is used for plagarism detection.
-
-### What is cosine similarity?
-This measures how similar two vectors are by the cosine of the angle between them. 1 means an identical direction. 0 means unrelated.
-
-### What are shingles?
-A shingle (of k-shingle) is just another name for a k-gram, which is a sequence of k consecutive words or characters used to break a document into a set of overlapping fragments so you can mathematically compare how similar two texts are using tools like Jaccard or MinHash.  
-
-### What is MinHash?
-MinHash is the LSH (Locality-Sensitivity Hashing) technique that actually approximates Jaccard similarity.  
-
-### What is simHash
-simHash is the LSH technique that approximates cosine similarity.
-
-### Tell me about LSH.
-This is a family of techniques that hash similar items into the same buckets with high probability, so instead of comparing everything O(n²) pairwise, you only compare hings that land in the same bucket, making near-duplication detection feasible at scale (minHash an simHash are both specific LSH schemes).
-
-### Comparison and fingerprint length.
-If I do a simHash on the text "Peter is a happy lad" and "Peter is a happy lad who has a dog", then because simHash always produces a fixed-sized fingerprint regardless of input length, and because the shorter text's features (tokens/shingles) are almost entirely contained in the longer one, the shared features will dominate the final hash, so the Hamming distance will be small.
-
-Whereas if I do a simHash on the text "Anne is a sad girl who has a dog" and "Peter is a happy lad who has a dog", these text differ in 3 content words and have a 5/9 shared number of words.  Using bigram shingles, we have 4/8 shared bigrams ("is a", "who has", "has a", "a dog").
-
-But if I do a simHash on the text as "Peter is a happy lad with a dog" and "Peter is a happy lad without a horse", then they share 5/8 words and 4/7 bigrams.
-
-
-## What is a key-management service?
-In practice, the crypt key lives in a KMS (hardware-backed key management service) or HSM (hardware security module), rather than in code or in configuration files.  A KMS is something like Amazon Web Service KMS, or Google Cloud Platform KMS; and a HSM is a tamper-resistent hardware box that protects those keys so they can be used (e.g. to decrypt the crypt without anyone ever seeing or exporting the raw secret).  For self-hosted runners the *real* crypt key lives in an external secret store, and GitLab injects only a short-lived masked secret into the runner at job runtime such that the key is never within the repo, and it won't be baked into Docker images, and is scoped to specific projects and environments, so that it only exists within RAM on that runner whilst the particular CI job is decrypting the crypt.
-
-HashiCorps Vault (or Openbao) is a self-hosted secrets manager that acts as a locked safe for passwords, API keys, and encyption keys, giving you a central place to store them encrypted, and to fetch short-lived credentials at runtime instead of hardcoding them in configs or in GitLab.
-
-On-premises KMS/HSM means that instead of storing your encryption keys in a public cloud, they stay logically and physically under your control via your organisation running its own key-management system and hardware security modules within *your* own data centre which will be managed still by a central locked-down service.
-
-A hardened OS/Kubernetes secrets backend is basically "Vault-lite" in the sense that you store secrets in the Kubernetes store which runs atop of the underlying operating system which is running on your servers (typically a hardened Linux distro like Ubuntu, Debian, or RHEL).  You make sure that the secrets which are stored in the Kubernetes store are encrypted at rest, and you lock the read-access to a tiny set of service accounts, injecting them into jobs only at runtime via the environment variables (temporary key=value settings which are visible only to that running process) or ephemeral volumes  (temporary filesystem mounts that exist only while the container/pod is alive). Every user/service gets the *minimum* permissions they need and nothing more, so only a few well-defined identities are ever allowed to read or use the encyption key.  You lock down each server which is within your cluster by disabling unused services. You lock down ports (by using a firewall on each host), and you enforce strong authentification like SSH keys, or 2-factor authentification, or SSO (Single Sign-On) with identity providers, such that an attacker will need more than one stolen credential to break in.  With SSO, you log in once with a central identity provider (which is an infrastructure--which is an identity provider service like Okta, Azure AD, or Google Workspace) that checks your login (password, multi-factor authentification, etc) and validates your account, and then issues short-lived tokens trusted tokens that the other apps accept as proof of who you are.
-
-In any case, whichever key management system you choose to use, the idea is that the crypt key will never live within images, repos, or on long-lived disks and thus would be very hard to exfiltrate even if a node becomes compromised. 
-
-## What are RAG Shards?
-In the RAG (retrieval) world, a **Shard** is an horizontal partition of your **Vector Index**" (the database holding your embeddings).  Basically, instead of one giant searchable map that chokes a single server, you slice the map into pieces (shards) distributed across multiple nodes so you can search them in parallel (where "nodes" means the individual machines or logical database instances in the cluster).  
-
-These RAG shards are conceptually distinct from the shards which are just the split-up JSONL files from "mbox-pre-parser.rb" which just hold many rows up to a limit after "mbox_pre-parser.rb" has done its processing upon the mbox. These latter particular shards are just an I/O concern.  Rag Shards are particular to Machine Learning and the implementation of artificial intelligence.
-
-## How do these "nodes" work then?
-Each node holds one or more RAG Shards of the index and runs it own little search engine, and a co-ordinator fans your query out to those nodes and then merges their results back together.
 
 ## How do we validate that the newer LoRA adapter does a better job than the last one?
-We validate by running both adapters on the same frozen test set, checking that the new one wins on our key performance indicators (accuracy, helpfulness, safety), and doesn't regress on guardrails. These guardrails are the **runtime safety and compliance filters** (checking for PII, hallucinations, or toxicity like hate speech, harassment, or slurs) that intervene during the process of inference, and the frozen test set (test.jsonl) serves as the **unseen calibration set** used to measure the **False Positive Rate** of these guardrails--thus verifying that these safety rules aren't so aggressive that they accidentally block valid *future* use-cases from training the language model during a rollover pin bump.  The model + guardrails should allow and handle correctly future use-cases rather than blocking them as unsafe or as being outside of the distribution.
+We validate by running both adapters on the same test set, checking that the new one wins on our key performance indicators (accuracy, helpfulness, safety), and doesn't regress on guardrails. These guardrails are the **runtime safety and compliance filters** (checking for PII, hallucinations, or toxicity like hate speech, harassment, or slurs) that intervene during the process of inference, and the test set ("test.jsonl") serves as the **unseen calibration set** which is finally used (ater training) to measure the **False Positive Rate** of these guardrails : thus verifying that these safety rules weren't so aggressive that they accidentally blocked valid use-cases from training the language model during a rollover pin bump.  During training, the model + guardrails should allow and handle use-cases correctly rather than blocking them as unsafe or as being outside of the distribution.  During training the decontaminated set as "train.jsonl" is being compared with that of "val.jsonl". To use "test" (after training) you format each row with the *same* Alpaca/system template used at train-time, perform generation from `instruction` + `input`, and then compare what has been generated with the ***gold output*** contained within those Alpaca rows within "test.jsonl", by metric (ROUGE/BLEU/exact-match, perplexity).
 
-## Why we do *not* need git-crypt 
-We do **not** need git-crypt at all for four reasons:
-
-- 1. git-crypt can only store encrypted files within a git directory.
-- 2. We don't require git commits or tracking on the email vault.
-- 3. It would be technically difficult to map a git repo in any Job Container to a backend directory on the Host.
-- 4. We don't want to store *any* email data (encrypted or clear) in our main repo.
-
-If we were to store encrypted emails addresses within an email_crypt (which I do *not* implement) we would use `gpg` instead, and store these outside of the mboxMinerva repo.
-
-We would thereby treat the "crypt" (which is our email "vault") which stores our encrypted email hashes on the Container pipeline backend as "opaque GPG blobs".  On the Host we could generate a long-lived GPG keypair (or symmetric passphrase) and store this secret in OpenBao.  Within the CI we could pull this secret and use it to unlock the gpg encrypted email_crypt (which is our vault of encrypted email hashes).  Depending upon the design decision we could do this either at a file level (each file that stores emails get encrypted), or at a granular level (whereby each encrypted email hash is stored one-by-one within a clear file).  In any case, it is unclear what benefit storing `gpg` hashes of each email (or even each email address) would achieve.  I include this within this document as it was a useful thought experiment which lead to this dead-end being eliminated from the design.
-
-TO DO.  implement `contamination_guard.rb`
-
-## SpamAssassin (SA)
-SpamAssassin is a mult-layered scoring engine.  It combines regex pattern matching (sketchy phrases, ALL CAPS), Bayesian classification (trained of spam/ham corpora), DNS blocklists (known bad sender IPs), header forgery detection, and collaborative databases to assign cumulation points: pertaining to which if a threshold is crossed (default is 5.0) then this is marked as spam.
-
-SpamAssassin would create a "tagged.mbox", which now has has spam messages marked with headers like:
-
-```
-X-Spam-Flag: YES
-X-Spam-Status: Yes, score=15.4 required=5.0 ...
-Subject: *****SPAM***** Buy cheap whatever...
-```
-(for setup of SpamAssassin see [SpamAssassin](./extra_docs/spam_assassin.md))
-
-SpamAssassin does not use Jaccard overlap.  It relies upon Bayesian probabilities and regular expression heuristics.  Header heuristics are regex/pattern rules that score suspect header traits : things like missing or forged header ids, received chains that don't trace back properly, date headers in the future, mismatched From/Reply-to domains, sketchy X-Mailer strings, and technical footprints left by automated software, like "Precedence: bulk" or "List-Unsubscribe" headers or specific X-Mailer tags (e.g. MailChimp, SendGrid) that indicate that a message was not individually typed by a human.  Although not technically spam by definition, they often trigger scores is SpamAssassin because they signal non-personal, low-priority content. 
-
-### Tell me about Bayesian classification
-This treats each word as evidence.  During training you feed it known ham and spam. It counts word frequencies in each class to compute the probability of spam give a word using Bayes' theorem.  At runtime it multiplies the spam probabilities of all the words in a message to get an overall score. The combined product decides the verdict.  
-
-### Does SA come by default with a reasonable known dictionary of spam/ham words?
-No.  SpamAssassin's Bayes engine actually ships "empty" and it won't even activate until you feed it 200 ham and 200 spam messages via sa-learn.  However the other non-Bayesian modules (like regexp rules, header checks, and DNS blocklists) *do* come with a massive, pre-weighted rulebook that workds out of the box.
-
-# Why I don't need this (hypothetical) SpamAssassin Integration
-SpamAssassin integration is probably not worth the hassle because 
-- 1. The mbox contains many years of historical emails so DNS blocklists and fingerprint databases won't be usful any more.
-- 2. The Bayesian won't work out of the box unless I manually set it with 200 spam and ham.
-- 3. The regexp pattern matching, for all I know, might lead to false positives.
-- 4. Exact dedupe removals and fuzzy dedupe might be enough.
-
----
-
-## Post-Materialization Audit
-
-### Contamination Guard (`contamination_guard.rb`)
-While the primary split logic relies on deterministic `thread_id` hashing to keep threads whole, to prevent cross-split leakage occuring via forwarded messages or boilerplate content. 
-
-The `contamination_guard.rb` tool acts as a final audit gate:
-1. **Methods**: It uses dual-fingerprinting:
-   - **W-Shingling**: Measures Jaccard Similarity (set-based overlap of word triplets).
-   - **SimHash**: Measures bit-wise Hamming distance between body content signatures.
-2. **Detection**: It performs O(n²), or even O(n), comparisons across the materialized `train.jsonl`, `val.jsonl`, and `test.jsonl` files.
-3. **Quarantine Policies**:
-   - `quarantine_test` (default): Drops the test/val side of a contaminated pair.
-   - `quarantine_both`: Completely removes contaminated IDs from the workflow.
-   - `coassign`: Theoretically flags items for manual relocation (infrastructure dependent).
-4. **Outputs**:
-   - `contamination_report.json`: Detailed breakdown of every found link and similarity score.
-   - `exclusions.txt`: A plain-text list of `record_id`s to be ignored by downstream trainers. Note : This file is **overwritten** on each run; cumulative lists must be managed manually.
-
-TO DO, facilitate the rebuilding of KG, and RAG embeddings within the vector DB every retrain done to LoRA.  Also facilitate the possible rebuilding of KG and RAG independently of a retrain of LoRA.
